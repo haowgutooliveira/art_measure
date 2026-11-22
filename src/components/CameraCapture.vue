@@ -1,55 +1,127 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { useDepthScale } from '../composables/useDepthScale.js'
+import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { useARCamera } from '../composables/useARCamera.js'
 
 const emit = defineEmits(['captured'])
 
-const { distanceCm, distanceHint, calcPixelsPerCm, guideRingDiameter } = useDepthScale()
+const ar = useARCamera()
 
-// ─── Camera state ─────────────────────────────────────────────────────────
-const videoRef     = ref(null)
+// ─── State ────────────────────────────────────────────────────────────────────
+// 'checking' | 'ar-active' | 'capturing' | 'fb-ready' | 'error' | 'done'
+const camState   = ref('checking')
+const camError   = ref('')
+const isFlashing = ref(false)
+
+// ─── DOM refs ─────────────────────────────────────────────────────────────────
+const arOverlayRef = ref(null)
+const fbVideoRef   = ref(null)
 const hiddenCanvas = ref(null)
-const overlayRef   = ref(null)
-let   mediaStream  = null
+let   fbStream     = null
 
-const camState  = ref('idle')  // idle | loading | ready | error | captured
-const camError  = ref('')
-const isFlashing = ref(false)  // UX #1 — flash de captura
+// ─── Fallback: fixed distance ─────────────────────────────────────────────────
+const FB_DISTANCE_CM = 25   // typical phone-to-skin distance for a reference shot
 
-// ─── Guide ring ───────────────────────────────────────────────────────────
-const ringDiameter = ref(100)
-
-function updateRing() {
-  if (!overlayRef.value) return
-  ringDiameter.value = guideRingDiameter(overlayRef.value.clientWidth)
+/** pixelsPerCm using pinhole model at a fixed 25 cm */
+function fbCalcPixelsPerCm(imageWidthPx) {
+  const H_FOV_RAD = (65 * Math.PI) / 180
+  const focalPx   = imageWidthPx / (2 * Math.tan(H_FOV_RAD / 2))
+  return focalPx / FB_DISTANCE_CM
 }
 
-let ro = null
-
-// ─── UX #12 — instruções de recovery específicas por SO ──────────────────
+// ─── OS recovery hint ─────────────────────────────────────────────────────────
 const recoveryInstructions = computed(() => {
   const ua = navigator.userAgent
-  if (/iPhone|iPad/.test(ua))
-    return 'iPhone/iPad: Ajustes → Safari → Câmera → Permitir'
-  if (/Android/.test(ua))
-    return 'Android: Configurações → Apps → Chrome → Permissões → Câmera'
+  if (/iPhone|iPad/.test(ua)) return 'iPhone/iPad: Ajustes → Safari → Câmera → Permitir'
+  if (/Android/.test(ua))     return 'Android: Configurações → Apps → Chrome → Permissões → Câmera'
   return 'Verifique as permissões de câmera nas configurações do navegador.'
 })
 
-// ─── Camera init ──────────────────────────────────────────────────────────
-async function startCamera() {
-  camState.value = 'loading'
-  camError.value = ''
+// ─── Distance status (AR only) ────────────────────────────────────────────────
+const distStatus = computed(() => {
+  if (camState.value !== 'ar-active') return { ok: true }
+  const d = ar.distanceCm.value
+  if (d === null) return { text: 'Apontando para a área…', ok: false }
+  if (d < 10)    return { text: 'Muito perto', ok: false }
+  if (d > 80)    return { text: 'Muito longe', ok: false }
+  return { text: null, ok: true }
+})
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+onMounted(async () => {
+  await ar.checkSupport()
+  if (ar.isSupported.value) {
+    await startAR()
+  } else {
+    await startFallback()
+  }
+})
+
+onUnmounted(() => {
+  ar.stop().catch(() => {})
+  stopFallback()
+})
+
+// ─── AR mode ──────────────────────────────────────────────────────────────────
+async function startAR() {
+  camState.value = 'checking'
   try {
-    mediaStream = await navigator.mediaDevices.getUserMedia({
+    await nextTick()
+    await ar.start(arOverlayRef.value)
+    camState.value = 'ar-active'
+  } catch {
+    await startFallback()
+  }
+}
+
+async function captureAR() {
+  if (!distStatus.value.ok) return
+  isFlashing.value = true
+  setTimeout(() => { isFlashing.value = false }, 300)
+  camState.value = 'capturing'
+
+  try {
+    const { lockedDistanceCm, pixelsPerCm: tempPpc } = await ar.lockAndRelease(1920)
+
+    const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false,
     })
-    camState.value = 'ready'
+    const video = document.createElement('video')
+    video.srcObject = stream; video.muted = true; video.playsInline = true
+    await video.play()
+    await new Promise(r => requestAnimationFrame(r))
+
+    const W = video.videoWidth || 1920
+    const H = video.videoHeight || 1080
+    const canvas = hiddenCanvas.value
+    canvas.width = W; canvas.height = H
+    canvas.getContext('2d').drawImage(video, 0, 0, W, H)
+    stream.getTracks().forEach(t => t.stop())
+
+    const imageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
+    const pixelsPerCm  = ar.calcPixelsPerCm(W, lockedDistanceCm)
+
+    camState.value = 'done'
+    emit('captured', { imageDataUrl, pixelsPerCm, distanceCm: lockedDistanceCm })
+  } catch {
+    camError.value = 'Não foi possível capturar a foto.'
+    camState.value = 'error'
+  }
+}
+
+// ─── Fallback mode ────────────────────────────────────────────────────────────
+async function startFallback() {
+  camState.value = 'checking'
+  camError.value = ''
+  try {
+    fbStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    })
+    camState.value = 'fb-ready'
     await nextTick()
-    videoRef.value.srcObject = mediaStream
-    await videoRef.value.play()
-    updateRing()
+    fbVideoRef.value.srcObject = fbStream
+    await fbVideoRef.value.play()
   } catch (err) {
     camState.value = 'error'
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
@@ -57,128 +129,123 @@ async function startCamera() {
     } else if (err.name === 'NotFoundError') {
       camError.value = 'Nenhuma câmera encontrada neste dispositivo.'
     } else {
-      camError.value = `Não foi possível acessar a câmera.`
+      camError.value = 'Não foi possível acessar a câmera.'
     }
   }
 }
 
-function stopCamera() {
-  mediaStream?.getTracks().forEach(t => t.stop())
-  mediaStream = null
+function stopFallback() {
+  fbStream?.getTracks().forEach(t => t.stop())
+  fbStream = null
 }
 
-// ─── Capture com flash (UX #1) ────────────────────────────────────────────
-function capture() {
-  // Flash visual
+function captureFallback() {
   isFlashing.value = true
   setTimeout(() => { isFlashing.value = false }, 300)
 
-  const video  = videoRef.value
+  const video  = fbVideoRef.value
   const canvas = hiddenCanvas.value
   const W = video.videoWidth, H = video.videoHeight
   canvas.width = W; canvas.height = H
   canvas.getContext('2d').drawImage(video, 0, 0, W, H)
 
   const imageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-  const ppc          = calcPixelsPerCm(W)
+  const pixelsPerCm  = fbCalcPixelsPerCm(W)
 
-  // Pequeno delay para o flash ser perceptível antes de trocar de tela
   setTimeout(() => {
-    camState.value = 'captured'
-    stopCamera()
-    emit('captured', { imageDataUrl, pixelsPerCm: ppc, distanceCm: distanceCm.value })
+    camState.value = 'done'
+    stopFallback()
+    emit('captured', { imageDataUrl, pixelsPerCm, distanceCm: FB_DISTANCE_CM })
   }, 220)
 }
 
-// ─── Lifecycle ────────────────────────────────────────────────────────────
-onMounted(() => {
-  startCamera()
-  ro = new ResizeObserver(updateRing)
-  if (overlayRef.value) ro.observe(overlayRef.value)
-})
-onUnmounted(() => { stopCamera(); ro?.disconnect() })
-watch(distanceCm, updateRing)
+function retryCamera() {
+  if (ar.isSupported.value) startAR()
+  else startFallback()
+}
 </script>
 
 <template>
+  <!-- ── AR overlay ─────────────────────────────────────────────────────────── -->
+  <Teleport to="body">
+    <div
+      v-if="camState === 'ar-active' || camState === 'capturing'"
+      ref="arOverlayRef"
+      class="ar-overlay"
+    >
+      <div class="capture-flash" :class="{ flashing: isFlashing }" />
+
+      <!-- Distance badge (top center) -->
+      <div v-if="ar.distanceCm.value !== null" class="ar-dist-badge" :class="{ ok: distStatus.ok }">
+        <span class="dist-num metric">{{ ar.distanceCm.value }}</span>
+        <span class="dist-unit">cm</span>
+        <span v-if="distStatus.text" class="dist-status">— {{ distStatus.text }}</span>
+      </div>
+
+      <!-- Instruction -->
+      <div class="ar-instruction">
+        Aponte o ponto para a área a ser tatuada
+      </div>
+
+      <!-- Reticle — centred on screen -->
+      <div class="ar-reticle" :class="{ hit: ar.hasHit.value }">
+        <span class="reticle-h" /><span class="reticle-v" />
+        <span class="reticle-ring" />
+      </div>
+
+      <!-- Shutter -->
+      <div class="ar-controls">
+        <button
+          class="shutter-btn"
+          :disabled="!distStatus.ok || camState === 'capturing'"
+          aria-label="Capturar foto"
+          @click="captureAR"
+        >
+          <span class="shutter-inner" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  </Teleport>
+
+  <!-- ── Component shell ────────────────────────────────────────────────────── -->
   <div class="cam-wrap">
 
-    <!-- ── Loading ──────────────────────────────────────────────────────── -->
-    <div v-if="camState === 'loading'" class="cam-state">
-      <div class="spinner"></div>
-      <p>Abrindo câmera…</p>
+    <!-- Loading / capturing -->
+    <div v-if="camState === 'checking' || camState === 'capturing' || camState === 'ar-active'" class="cam-state">
+      <div class="spinner" />
+      <p v-if="camState === 'checking'">Iniciando câmera…</p>
+      <p v-else-if="camState === 'capturing'">Capturando…</p>
     </div>
 
-    <!-- ── Error ────────────────────────────────────────────────────────── -->
+    <!-- Error -->
     <div v-else-if="camState === 'error'" class="cam-state cam-error">
       <span class="cam-error-icon">📵</span>
       <p class="cam-error-msg">{{ camError }}</p>
-      <!-- UX #12 — instrução específica por SO -->
       <p class="cam-recovery">📋 {{ recoveryInstructions }}</p>
-      <button class="btn btn-amber" @click="startCamera">Tentar Novamente</button>
+      <button class="btn btn-amber" @click="retryCamera">Tentar Novamente</button>
     </div>
 
-    <!-- ── Camera ready ──────────────────────────────────────────────────── -->
-    <template v-else-if="camState === 'ready'">
-      <video ref="videoRef" class="cam-video" autoplay muted playsinline />
+    <!-- Fallback: plain camera + reticle, no slider -->
+    <template v-else-if="camState === 'fb-ready'">
+      <video ref="fbVideoRef" class="cam-video" autoplay muted playsinline />
 
-      <!-- UX #1 — flash de captura -->
       <div class="capture-flash" :class="{ flashing: isFlashing }" />
 
-      <!-- Guide overlay — UX #2 crosshair removido -->
-      <div class="cam-overlay" ref="overlayRef">
-        <div
-          class="guide-ring"
-          :style="{ width: ringDiameter + 'px', height: ringDiameter + 'px' }"
-        >
-          <span class="guide-label">10 cm</span>
+      <!-- Same reticle as AR mode, but no distance badge -->
+      <div class="cam-overlay">
+        <div class="ar-instruction fb-instruction">
+          Aponte o ponto para a área a ser tatuada e capture
         </div>
 
-        <div class="cam-instruction">
-          Ajuste a distância até o anel ter ~10 cm e capture
+        <div class="ar-reticle hit">
+          <span class="reticle-h" /><span class="reticle-v" />
+          <span class="reticle-ring" />
         </div>
       </div>
 
-      <!-- Bottom controls -->
       <div class="cam-controls">
-        <!-- UX #10 — role="status" aria-live no hint de distância -->
-        <div
-          class="dist-hint"
-          :class="{ ok: distanceHint.ok }"
-          role="status"
-          aria-live="polite"
-        >
-          {{ distanceHint.text }}
-        </div>
-
-        <div class="dist-row">
-          <span class="dist-label">{{ distanceCm }} cm</span>
-          <div class="dist-slider-wrap">
-            <span class="dist-icon">📱</span>
-            <input
-              type="range"
-              class="dist-slider"
-              min="15"
-              max="60"
-              step="1"
-              v-model.number="distanceCm"
-              aria-label="Distância do celular à superfície em centímetros"
-              :aria-valuetext="`${distanceCm} centímetros — ${distanceHint.text}`"
-            />
-            <span class="dist-icon">🖐</span>
-          </div>
-          <!-- UX #3 — âncoras de distância descritivas -->
-          <span class="dist-desc">perto ←&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ longe</span>
-        </div>
-
-        <!-- UX #10 — aria-label no shutter -->
-        <button
-          class="shutter-btn"
-          @click="capture"
-          :disabled="!distanceHint.ok"
-          aria-label="Capturar foto"
-        >
-          <span class="shutter-inner" aria-hidden="true"></span>
+        <button class="shutter-btn" aria-label="Capturar foto" @click="captureFallback">
+          <span class="shutter-inner" aria-hidden="true" />
         </button>
       </div>
     </template>
@@ -188,6 +255,7 @@ watch(distanceCm, updateRing)
 </template>
 
 <style scoped>
+/* ── Shell ────────────────────────────────────────────────────────────────── */
 .cam-wrap {
   flex: 1;
   position: relative;
@@ -196,7 +264,6 @@ watch(distanceCm, updateRing)
   overflow: hidden;
   background: #000;
 }
-
 .cam-video {
   position: absolute;
   inset: 0;
@@ -205,19 +272,7 @@ watch(distanceCm, updateRing)
   object-fit: cover;
 }
 
-/* ── UX #1 — Flash de captura ─────────────────────────────────────────── */
-.capture-flash {
-  position: absolute;
-  inset: 0;
-  background: #fff;
-  opacity: 0;
-  pointer-events: none;
-  z-index: 50;
-  transition: opacity 0.08s ease-out;
-}
-.capture-flash.flashing { opacity: 0.85; }
-
-/* ── Loading / error ──────────────────────────────────────────────────── */
+/* ── Loading / error ──────────────────────────────────────────────────────── */
 .cam-state {
   flex: 1;
   display: flex;
@@ -229,12 +284,9 @@ watch(distanceCm, updateRing)
   padding: 32px;
   text-align: center;
 }
-
-.cam-error     { color: #fca5a5; }
+.cam-error      { color: #fca5a5; }
 .cam-error-icon { font-size: 48px; }
 .cam-error-msg  { font-size: 15px; line-height: 1.5; }
-
-/* UX #12 — caixa de recovery */
 .cam-recovery {
   font-size: 13px;
   line-height: 1.6;
@@ -245,7 +297,6 @@ watch(distanceCm, updateRing)
   max-width: 280px;
   text-align: left;
 }
-
 .spinner {
   width: 40px; height: 40px;
   border: 3px solid var(--bg-700);
@@ -255,151 +306,172 @@ watch(distanceCm, updateRing)
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Overlay — UX #2 crosshair removido ──────────────────────────────── */
-.cam-overlay {
-  position: absolute;
+/* ── Flash ────────────────────────────────────────────────────────────────── */
+.capture-flash {
+  position: fixed;
   inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 9999;
+  transition: opacity 0.08s ease-out;
+}
+.capture-flash.flashing { opacity: 0.85; }
+
+/* ── AR overlay ───────────────────────────────────────────────────────────── */
+.ar-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
   pointer-events: none;
 }
+.ar-overlay .ar-controls,
+.ar-overlay .shutter-btn { pointer-events: auto; }
 
-.guide-ring {
-  position: relative;
-  border-radius: 50%;
-  border: 2px dashed rgba(245,158,11,0.85);
-  box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.3);
-  transition: width 0.15s, height 0.15s;
+/* ── Distance badge ───────────────────────────────────────────────────────── */
+.ar-dist-badge {
+  position: fixed;
+  top: max(24px, env(safe-area-inset-top, 24px));
+  left: 50%;
+  transform: translateX(-50%);
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: baseline;
+  gap: 4px;
+  background: rgba(2, 30, 45, 0.82);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 20px;
+  padding: 6px 16px;
+  transition: border-color 0.25s;
+  pointer-events: none;
+  white-space: nowrap;
 }
+.ar-dist-badge.ok { border-color: rgba(46, 196, 182, 0.6); }
 
-/* UX #3 — label mais descritivo */
-.guide-label {
-  font-size: 11px;
+.dist-num {
+  font-size: 24px;
   font-weight: 700;
-  color: rgba(245,158,11,0.95);
-  text-shadow: 0 1px 4px rgba(0,0,0,0.95);
+  color: #fca5a5;
+  line-height: 1;
+  transition: color 0.25s;
 }
+.ar-dist-badge.ok .dist-num { color: var(--accent-amber); }
+.dist-unit   { font-size: 13px; font-weight: 600; color: var(--text-300); }
+.dist-status { font-size: 12px; color: #fca5a5; transition: color 0.25s; }
+.ar-dist-badge.ok .dist-status { color: #2EC4B6; }
 
-/* UX #3 — instrução com âncora concreta, sem whitespace:nowrap */
-.cam-instruction {
-  position: absolute;
-  top: 12px;
+/* ── Instruction ──────────────────────────────────────────────────────────── */
+.ar-instruction {
+  position: fixed;
+  bottom: calc(140px + env(safe-area-inset-bottom, 0px));
   left: 16px;
   right: 16px;
   text-align: center;
-  background: rgba(15,23,42,0.78);
+  background: rgba(2, 30, 45, 0.78);
   backdrop-filter: blur(8px);
-  border: 1px solid rgba(255,255,255,0.1);
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 20px;
-  padding: 7px 16px;
-  font-size: 13px;
+  padding: 8px 20px;
+  font-size: 14px;
   line-height: 1.4;
   color: var(--text-100);
+  pointer-events: none;
 }
 
-/* ── Bottom controls ──────────────────────────────────────────────────── */
+/* ── Reticle ──────────────────────────────────────────────────────────────── */
+.ar-reticle {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.15s;
+}
+.ar-reticle.hit { transform: scale(1.1); }
+
+.reticle-ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 183, 3, 0.4);
+  transition: border-color 0.2s;
+}
+.ar-reticle.hit .reticle-ring { border-color: rgba(255, 183, 3, 0.9); }
+
+.reticle-h, .reticle-v {
+  position: absolute;
+  background: rgba(255, 183, 3, 0.75);
+  border-radius: 1px;
+}
+.reticle-h { width: 24px; height: 2px; }
+.reticle-v { width: 2px;  height: 24px; }
+.ar-reticle.hit .reticle-h,
+.ar-reticle.hit .reticle-v { background: #FFB703; }
+
+/* ── AR shutter bar ───────────────────────────────────────────────────────── */
+.ar-controls {
+  position: fixed;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px 20px calc(24px + env(safe-area-inset-bottom, 0px));
+  display: flex;
+  justify-content: center;
+  background: linear-gradient(transparent, rgba(2, 30, 45, 0.88) 40%);
+}
+
+/* ── Fallback overlay ─────────────────────────────────────────────────────── */
+.cam-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.fb-instruction {
+  position: absolute;
+  bottom: calc(130px + env(safe-area-inset-bottom, 0px));
+  left: 16px;
+  right: 16px;
+}
+
+/* ── Fallback shutter bar ─────────────────────────────────────────────────── */
 .cam-controls {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
-  padding: 12px 20px calc(20px + env(safe-area-inset-bottom, 0px));
-  background: linear-gradient(transparent, rgba(15,23,42,0.92) 30%);
+  padding: 16px 20px calc(24px + env(safe-area-inset-bottom, 0px));
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
+  justify-content: center;
+  background: linear-gradient(transparent, rgba(2, 30, 45, 0.88) 40%);
 }
 
-.dist-hint {
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 14px;
-  border-radius: 20px;
-  background: rgba(239,68,68,0.2);
-  border: 1px solid rgba(239,68,68,0.4);
-  color: #fca5a5;
-  transition: all 0.2s;
-}
-.dist-hint.ok {
-  background: rgba(34,197,94,0.2);
-  border-color: rgba(34,197,94,0.4);
-  color: #86efac;
-}
-
-.dist-row {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-
-.dist-label {
-  font-size: 20px;
-  font-weight: 800;
-  color: var(--accent-amber);
-  line-height: 1;
-}
-
-/* UX #3 — ícones de âncora no lugar de "15" / "60 cm" */
-.dist-icon { font-size: 16px; }
-
-.dist-slider-wrap {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.dist-desc {
-  font-size: 11px;
-  color: var(--text-300);
-}
-
-.dist-slider {
-  flex: 1;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bg-600);
-  outline: none;
-  cursor: pointer;
-}
-.dist-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 22px; height: 22px;
-  border-radius: 50%;
-  background: var(--accent-amber);
-  cursor: pointer;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
-}
-
+/* ── Shutter button ───────────────────────────────────────────────────────── */
 .shutter-btn {
-  width: 68px; height: 68px;
+  width: 72px; height: 72px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.15);
-  border: 3px solid rgba(255,255,255,0.8);
+  background: rgba(255, 255, 255, 0.15);
+  border: 3px solid rgba(255, 255, 255, 0.85);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   transition: transform 0.1s, opacity 0.15s;
   -webkit-tap-highlight-color: transparent;
-  margin-top: 4px;
 }
 .shutter-btn:active   { transform: scale(0.9); }
 .shutter-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
 .shutter-inner {
-  width: 50px; height: 50px;
+  width: 54px; height: 54px;
   border-radius: 50%;
-  background: rgba(255,255,255,0.9);
+  background: rgba(255, 255, 255, 0.9);
 }
 </style>
