@@ -5,23 +5,47 @@
   padding: 0;
 }
 
+/* ─── Design System — Tamanho da Arte ─────────────────────────────────────── */
+/* Paleta "The Ringleader": ocean navy, âmbar, laranja ação, teal             */
 :root {
-  --bg-900: #0f172a;
-  --bg-800: #1e293b;
-  --bg-700: #334155;
-  --bg-600: #475569;
-  --text-100: #f1f5f9;
-  --text-300: #94a3b8;
-  --accent-amber: #f59e0b;
-  --accent-amber-hover: #d97706;
-  --accent-green: #22c55e;
-  --accent-green-hover: #16a34a;
-  --accent-red: #ef4444;
-  --accent-blue: #3b82f6;
+  /* Backgrounds */
+  --bg-900: #023047;         /* app background principal */
+  --bg-800: #033B57;         /* painéis, cards */
+  --bg-700: #011E2D;         /* inputs, campos */
+  --bg-600: rgba(33,158,188,0.25); /* bordas e divisores teal-tinted */
+
+  /* Texto */
+  --text-100: #F1F5F9;       /* texto primário */
+  --text-300: #94B8CA;       /* texto secundário */
+
+  /* Âmbar — destaque, logo, métricas */
+  --accent-amber: #FFB703;
+  --accent-amber-hover: #E6A500;
+
+  /* Laranja — botão de ação primária */
+  --action-primary: #FB8500;
+  --action-primary-hover: #E07600;
+
+  /* Teal — sucesso, confirmações */
+  --accent-green: #2EC4B6;
+  --accent-green-hover: #25A89B;
+
+  /* Vermelho — erros, perigo */
+  --accent-red: #FF5A5F;
+
+  /* Teal label — rótulos mono, badges */
+  --accent-blue: #4CC3DF;
+
+  /* Foco — anel acessível */
+  --focus-ring: #6E6EFF;
+
+  /* Raios */
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 16px;
   --radius-xl: 24px;
+
+  /* Sombras */
   --shadow-lg: 0 10px 40px rgba(0,0,0,0.6);
   --shadow-sm: 0 2px 8px rgba(0,0,0,0.4);
 }
@@ -31,7 +55,7 @@ html, body {
   overflow: hidden;
   background: var(--bg-900);
   color: var(--text-100);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   touch-action: none;
@@ -51,7 +75,13 @@ h1, h2, h3 {
   line-height: 1.2;
 }
 
-/* ─── Buttons ─────────────────────────────────────────────────────────── */
+/* Valores métricos — JetBrains Mono com alinhamento tabular */
+.metric {
+  font-family: 'JetBrains Mono', 'Geist Mono', ui-monospace, monospace;
+  font-variant-numeric: lining-nums tabular-nums;
+}
+
+/* ─── Buttons ─────────────────────────────────────────────────────────────── */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -68,6 +98,11 @@ h1, h2, h3 {
   user-select: none;
 }
 
+.btn:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
 .btn:active {
   transform: scale(0.96);
 }
@@ -77,18 +112,20 @@ h1, h2, h3 {
   cursor: not-allowed;
 }
 
+/* Botão de ação primária — laranja com texto escuro (5.58:1 AA) */
 .btn-amber {
-  background: var(--accent-amber);
-  color: var(--bg-900);
+  background: var(--action-primary);
+  color: #011622;
 }
 
 .btn-amber:hover:not(:disabled) {
-  background: var(--accent-amber-hover);
+  background: var(--action-primary-hover);
 }
 
+/* Botão de confirmação — teal */
 .btn-green {
   background: var(--accent-green);
-  color: #fff;
+  color: #011622;
 }
 
 .btn-green:hover:not(:disabled) {
@@ -96,13 +133,13 @@ h1, h2, h3 {
 }
 
 .btn-ghost {
-  background: var(--bg-700);
+  background: var(--bg-800);
   color: var(--text-100);
   border: 1px solid var(--bg-600);
 }
 
 .btn-ghost:hover:not(:disabled) {
-  background: var(--bg-600);
+  background: rgba(33,158,188,0.15);
 }
 
 .btn-danger {
@@ -112,7 +149,7 @@ h1, h2, h3 {
 }
 
 .btn-danger:hover:not(:disabled) {
-  background: rgba(239,68,68,0.1);
+  background: rgba(255,90,95,0.1);
 }
 
 .btn-full {
@@ -124,7 +161,7 @@ h1, h2, h3 {
   font-size: 13px;
 }
 
-/* ─── Form ─────────────────────────────────────────────────────────── */
+/* ─── Form ─────────────────────────────────────────────────────────────────── */
 .input {
   width: 100%;
   padding: 12px 16px;
@@ -133,12 +170,19 @@ h1, h2, h3 {
   border-radius: var(--radius-sm);
   color: var(--text-100);
   font-size: 15px;
+  font-family: inherit;
   outline: none;
   transition: border-color 0.2s;
 }
 
 .input:focus {
   border-color: var(--accent-amber);
+  outline: none;
+}
+
+.input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
 }
 
 .input::placeholder {
@@ -160,7 +204,7 @@ label {
   letter-spacing: 0.05em;
 }
 
-/* ─── Scrollbar ─────────────────────────────────────────────────────────── */
+/* ─── Scrollbar ─────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 4px;
 }
@@ -168,6 +212,6 @@ label {
   background: var(--bg-800);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--bg-600);
+  background: rgba(33,158,188,0.4);
   border-radius: 2px;
 }

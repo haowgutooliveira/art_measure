@@ -80,8 +80,21 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
         <button v-if="step > 0" class="back-btn" @click="goBack" aria-label="Voltar">←</button>
       </div>
       <div class="logo">
-        <span class="logo-icon">🖋</span>
-        <span class="logo-text">Art<span class="logo-accent">Measure</span></span>
+        <!-- Logo T/A oficial — Esquadro com agulha de escala -->
+        <svg class="logo-ta" viewBox="6 10 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <g stroke="#FFB703" stroke-width="4" stroke-linecap="butt">
+            <path d="M32 20V58.75M14.25 20H49.75"/>
+          </g>
+          <defs>
+            <clipPath id="ta-logo">
+              <path d="M29.42 20H34.58L50.08 58.75H13.92Z"/>
+            </clipPath>
+          </defs>
+          <path clip-path="url(#ta-logo)" fill="none" stroke="#FFB703" stroke-width="4" d="M20.6 37.5A20.9 20.9 0 0 0 43.4 37.5"/>
+          <path fill="#FFB703" d="M29.42 20H34.58L50.08 58.75H45.78L32 24.31L18.22 58.75H13.92Z"/>
+          <rect x="8" y="12" width="48" height="48" stroke="#FFB703" stroke-width="3"/>
+        </svg>
+        <span class="logo-text">Tamanho <span class="logo-accent">da Arte</span></span>
       </div>
       <div class="header-right"></div>
     </header>
@@ -106,7 +119,23 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
     <!-- ── Step 0 — Intro ──────────────────────────────────────────────── -->
     <div v-if="step === 0" class="page page-intro">
       <div class="intro-hero">
-        <div class="intro-icon-wrap">🖋</div>
+        <!-- Logo T/A expandido na tela de intro -->
+        <div class="intro-icon-wrap">
+          <svg viewBox="0 0 64 72" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true" style="width:52px;height:58px">
+            <g stroke="#FFB703" stroke-width="3.5" stroke-linecap="butt">
+              <path d="M32 20V58.75M14.25 20H49.75"/>
+            </g>
+            <defs>
+              <clipPath id="ta-intro">
+                <path d="M29.74 20H34.26L49.76 58.75H14.24Z"/>
+              </clipPath>
+            </defs>
+            <path clip-path="url(#ta-intro)" fill="none" stroke="#FFB703" stroke-width="3.5" d="M20.6 37.5A20.9 20.9 0 0 0 43.4 37.5"/>
+            <path fill="#FFB703" d="M29.74 20H34.26L49.76 58.75H45.99L32 23.77L18.01 58.75H14.24Z"/>
+            <rect x="8" y="12" width="48" height="48" stroke="#FFB703" stroke-width="2.5"/>
+            <path d="M32 2V8M29 5H35M44 64V70M56 64V70M45 67H55M47 65.5L45 67L47 68.5M53 65.5L55 67L53 68.5" stroke="#FFB703" stroke-width="1.5"/>
+          </svg>
+        </div>
         <!-- UX #8 — título generalizado -->
         <h1 class="intro-title">Meça antes de criar</h1>
         <p class="intro-sub">
@@ -307,12 +336,16 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
 .logo {
   display: flex;
   align-items: center;
-  gap: 6px;
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: -0.02em;
+  gap: 8px;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
-.logo-icon   { font-size: 20px; }
+.logo-ta {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+}
 .logo-accent { color: var(--accent-amber); }
 
 /* ── Stepper ──────────────────────────────────────────────────────────────── */
@@ -392,14 +425,13 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
 }
 
 .intro-icon-wrap {
-  width: 80px; height: 80px;
-  background: rgba(245,158,11,0.12);
-  border: 2px solid rgba(245,158,11,0.3);
+  width: 88px; height: 88px;
+  background: rgba(255,183,3,0.1);
+  border: 2px solid rgba(255,183,3,0.3);
   border-radius: 50%;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 36px;
 }
 
 .intro-title {
