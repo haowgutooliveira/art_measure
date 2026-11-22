@@ -1,7 +1,8 @@
 <script setup>
 import { ref } from 'vue'
-import CameraCapture  from './components/CameraCapture.vue'
-import TattooCanvas   from './components/TattooCanvas.vue'
+import CameraCapture       from './components/CameraCapture.vue'
+import CalibrationOverlay  from './components/CalibrationOverlay.vue'
+import TattooCanvas        from './components/TattooCanvas.vue'
 import { useShoelaceArea } from './composables/useShoelaceArea.js'
 
 // ─── Global state ─────────────────────────────────────────────────────────
@@ -23,17 +24,20 @@ const tattooPhone   = ref('')
 const { areaCm2, boundingBox, formatWhatsApp } = useShoelaceArea(polygonPoints, pixelsPerCm)
 
 // ─── Handlers ─────────────────────────────────────────────────────────────
-function onCaptured({ imageDataUrl: url, pixelsPerCm: ppc, distanceCm }) {
+function onCaptured({ imageDataUrl: url }) {
   imageDataUrl.value = url
-  pixelsPerCm.value  = ppc
-  capturedDist.value = distanceCm
-  step.value = 2
+  step.value = 2   // go to calibration
+}
+
+function onCalibrated(ppc) {
+  pixelsPerCm.value = ppc
+  step.value = 3   // go to drawing
 }
 
 function onDrawingComplete({ points, snapshotUrl: snap }) {
   polygonPoints.value = points
   snapshotUrl.value   = snap
-  step.value = 3
+  step.value = 4
 }
 
 function sendWhatsApp() {
@@ -63,11 +67,11 @@ function restart() {
 }
 
 function goBack() {
-  if (step.value === 3) { step.value = 2; polygonPoints.value = []; return }
+  if (step.value === 4) { step.value = 3; polygonPoints.value = []; return }
   if (step.value > 0)   { step.value-- }
 }
 
-const STEPS = ['Câmera', 'Desenho', 'Resultado']
+const STEPS = ['Câmera', 'Escala', 'Desenho', 'Resultado']
 </script>
 
 <template>
@@ -150,23 +154,29 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
 
       <!-- How it works -->
       <div class="how-list">
-        <!-- UX #8 — textos generalizados -->
         <div class="how-item">
           <div class="how-num">1</div>
           <div>
             <strong>Câmera</strong>
-            <p>Aponte para a superfície e ajuste a distância até o anel de referência ter 10 cm. O app usa a geometria da câmera para calcular a escala real.</p>
+            <p>Enquadre a área e capture a foto. Sem configurações — só apertar o botão.</p>
           </div>
         </div>
         <div class="how-item">
           <div class="how-num">2</div>
           <div>
-            <strong>Desenho</strong>
-            <p>Risque o contorno da área da arte. Uma lupa aparece acima do dedo para precisão. Levante o dedo para reposicionar.</p>
+            <strong>Escala</strong>
+            <p>Na foto, toque em dois pontos cujo tamanho você conhece (ex.: largura do pulso = 6 cm). O app calcula a escala real automaticamente.</p>
           </div>
         </div>
         <div class="how-item">
           <div class="how-num">3</div>
+          <div>
+            <strong>Desenho</strong>
+            <p>Risque o contorno da área da arte. Uma lupa aparece acima do dedo para precisão.</p>
+          </div>
+        </div>
+        <div class="how-item">
+          <div class="how-num">4</div>
           <div>
             <strong>Resultado</strong>
             <p>Veja a área em cm² e as dimensões. Envie direto para o artista pelo WhatsApp.</p>
@@ -185,16 +195,23 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
       @captured="onCaptured"
     />
 
-    <!-- ── Step 2 — Drawing ────────────────────────────────────────────── -->
-    <TattooCanvas
+    <!-- ── Step 2 — Scale calibration ───────────────────────────────────── -->
+    <CalibrationOverlay
       v-if="step === 2 && imageDataUrl"
+      :imageDataUrl="imageDataUrl"
+      @confirm="onCalibrated"
+    />
+
+    <!-- ── Step 3 — Drawing ────────────────────────────────────────────── -->
+    <TattooCanvas
+      v-if="step === 3 && imageDataUrl"
       :imageDataUrl="imageDataUrl"
       :pixelsPerCm="pixelsPerCm"
       @complete="onDrawingComplete"
     />
 
-    <!-- ── Step 3 — Summary ────────────────────────────────────────────── -->
-    <div v-if="step === 3" class="page page-summary">
+    <!-- ── Step 4 — Summary ────────────────────────────────────────────── -->
+    <div v-if="step === 4" class="page page-summary">
 
       <!-- Snapshot preview -->
       <div v-if="snapshotUrl" class="snapshot-wrap">
@@ -237,8 +254,6 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
           {{ showTechDetails ? '▲' : '▼' }} Detalhes técnicos
         </button>
         <div v-if="showTechDetails" class="measure-meta">
-          Distância capturada: <strong>{{ capturedDist }} cm</strong>
-          &nbsp;·&nbsp;
           Escala: <strong>{{ pixelsPerCm.toFixed(1) }} px/cm</strong>
         </div>
       </div>
@@ -277,7 +292,7 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
         </button>
       </div>
 
-      <!-- UX #5 — Modal de confirmação reiniciar -->
+      <!-- Modal de confirmação reiniciar -->
       <Teleport to="body">
         <div v-if="showRestartModal" class="modal-backdrop" @click.self="cancelRestart">
           <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
