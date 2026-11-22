@@ -5,7 +5,9 @@ import TattooCanvas   from './components/TattooCanvas.vue'
 import { useShoelaceArea } from './composables/useShoelaceArea.js'
 
 // ─── Global state ─────────────────────────────────────────────────────────
-const step          = ref(0)   // 0=intro  1=camera  2=draw  3=summary
+const step              = ref(0)   // 0=intro  1=camera  2=draw  3=summary
+const showRestartModal  = ref(false)  // UX #5
+const showTechDetails   = ref(false)  // UX #4
 const imageDataUrl  = ref(null)
 const snapshotUrl   = ref(null)
 const pixelsPerCm   = ref(1)
@@ -43,7 +45,12 @@ function sendWhatsApp() {
   window.open(url, '_blank', 'noopener')
 }
 
+// UX #5 — confirmação antes de reiniciar
+function confirmRestart() { showRestartModal.value = true }
+function cancelRestart()  { showRestartModal.value = false }
+
 function restart() {
+  showRestartModal.value = false
   step.value = 0
   imageDataUrl.value  = null
   snapshotUrl.value   = null
@@ -52,6 +59,7 @@ function restart() {
   observations.value  = ''
   tattooPhone.value   = ''
   pixelsPerCm.value   = 1
+  showTechDetails.value = false
 }
 
 function goBack() {
@@ -59,7 +67,7 @@ function goBack() {
   if (step.value > 0)   { step.value-- }
 }
 
-const STEPS = ['Câmera', 'Desenho', 'Orçamento']
+const STEPS = ['Câmera', 'Desenho', 'Resultado']
 </script>
 
 <template>
@@ -68,7 +76,8 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
     <!-- ── Header ──────────────────────────────────────────────────────── -->
     <header class="app-header">
       <div class="header-left">
-        <button v-if="step > 0" class="back-btn" @click="goBack">←</button>
+        <!-- UX #9 — área de toque maior via padding -->
+        <button v-if="step > 0" class="back-btn" @click="goBack" aria-label="Voltar">←</button>
       </div>
       <div class="logo">
         <span class="logo-icon">🖋</span>
@@ -98,10 +107,11 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
     <div v-if="step === 0" class="page page-intro">
       <div class="intro-hero">
         <div class="intro-icon-wrap">🖋</div>
-        <h1 class="intro-title">Meça antes de tatuar</h1>
+        <!-- UX #8 — título generalizado -->
+        <h1 class="intro-title">Meça antes de criar</h1>
         <p class="intro-sub">
-          Tire uma foto da pele, risque a área da tatuagem<br/>
-          e envie o tamanho exato para o tatuador.
+          Fotografe a superfície, risque a área da arte<br/>
+          e envie o tamanho exato para o artista.
         </p>
       </div>
 
@@ -111,31 +121,32 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
 
       <!-- How it works -->
       <div class="how-list">
+        <!-- UX #8 — textos generalizados -->
         <div class="how-item">
           <div class="how-num">1</div>
           <div>
             <strong>Câmera</strong>
-            <p>Aponte para a área do corpo e ajuste a distância. O app usa a geometria da câmera para calcular a escala real.</p>
+            <p>Aponte para a superfície e encaixe o anel ao redor de uma moeda R$1. O app usa a geometria da câmera para calcular a escala real.</p>
           </div>
         </div>
         <div class="how-item">
           <div class="how-num">2</div>
           <div>
             <strong>Desenho</strong>
-            <p>Risque o contorno da região onde a tatuagem deve ficar. Uma lupa ampliada aparece acima do dedo para precisão.</p>
+            <p>Risque o contorno da área da arte. Uma lupa aparece acima do dedo para precisão. Levante o dedo para reposicionar.</p>
           </div>
         </div>
         <div class="how-item">
           <div class="how-num">3</div>
           <div>
-            <strong>Orçamento</strong>
-            <p>Veja a área em cm² e as dimensões. Envie direto para o tatuador pelo WhatsApp.</p>
+            <strong>Resultado</strong>
+            <p>Veja a área em cm² e as dimensões. Envie direto para o artista pelo WhatsApp.</p>
           </div>
         </div>
       </div>
 
       <p class="intro-note">
-        ℹ️ Funciona com a câmera traseira. Nenhuma foto é enviada para servidores — tudo fica no seu celular.
+        🔒 Nenhuma foto é enviada para servidores — tudo fica no seu celular.
       </p>
     </div>
 
@@ -158,7 +169,12 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
 
       <!-- Snapshot preview -->
       <div v-if="snapshotUrl" class="snapshot-wrap">
-        <img :src="snapshotUrl" class="snapshot-img" alt="Área marcada" />
+        <!-- UX #7 — alt dinâmico com as métricas -->
+        <img
+          :src="snapshotUrl"
+          class="snapshot-img"
+          :alt="`Área marcada: ${areaCm2.toFixed(1)} cm², ${boundingBox.widthCm.toFixed(1)} × ${boundingBox.heightCm.toFixed(1)} cm`"
+        />
         <div class="snapshot-caption">Confirme se a área marcada está correta</div>
       </div>
 
@@ -183,7 +199,15 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
             <span class="measure-desc">Altura</span>
           </div>
         </div>
-        <div class="measure-meta">
+        <!-- UX #4 — detalhes técnicos colapsáveis -->
+        <button
+          class="tech-toggle"
+          @click="showTechDetails = !showTechDetails"
+          :aria-expanded="showTechDetails"
+        >
+          {{ showTechDetails ? '▲' : '▼' }} Detalhes técnicos
+        </button>
+        <div v-if="showTechDetails" class="measure-meta">
           Distância capturada: <strong>{{ capturedDist }} cm</strong>
           &nbsp;·&nbsp;
           Escala: <strong>{{ pixelsPerCm.toFixed(1) }} px/cm</strong>
@@ -197,8 +221,10 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
           <input id="clientName" v-model="clientName" class="input" type="text" placeholder="Ex.: João Silva" />
         </div>
         <div class="form-group">
-          <label for="tattooPhone">Telefone do tatuador <span class="opt">(com DDI+DDD)</span></label>
+          <label for="tattooPhone">Telefone do artista <span class="opt">(opcional)</span></label>
           <input id="tattooPhone" v-model="tattooPhone" class="input" type="tel" placeholder="Ex.: 5511999990000" />
+          <!-- UX #13 — ajuda contextual abaixo do campo -->
+          <span class="field-hint">Inclua DDI + DDD, sem espaços. Ex.: 5511999990000</span>
         </div>
         <div class="form-group">
           <label for="obs">Observações <span class="opt">(opcional)</span></label>
@@ -214,10 +240,27 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
         <button class="btn btn-ghost btn-full btn-sm" @click="goBack">
           ← Ajustar Desenho
         </button>
-        <button class="btn btn-danger btn-full btn-sm" @click="restart">
+        <!-- UX #6 — separador visual antes de Nova Medição -->
+        <div class="actions-separator"></div>
+        <!-- UX #5 — dispara modal de confirmação -->
+        <button class="btn btn-danger btn-full btn-sm" @click="confirmRestart">
           🔄 Nova Medição
         </button>
       </div>
+
+      <!-- UX #5 — Modal de confirmação reiniciar -->
+      <Teleport to="body">
+        <div v-if="showRestartModal" class="modal-backdrop" @click.self="cancelRestart">
+          <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+            <p id="modal-title" class="modal-title">Iniciar nova medição?</p>
+            <p class="modal-body">A foto e o desenho atuais serão descartados.</p>
+            <div class="modal-actions">
+              <button class="btn btn-ghost" @click="cancelRestart">Cancelar</button>
+              <button class="btn btn-danger" @click="restart">Sim, descartar</button>
+            </div>
+          </div>
+        </div>
+      </Teleport>
     </div>
 
   </div>
@@ -255,7 +298,8 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
   color: var(--text-100);
   font-size: 20px;
   cursor: pointer;
-  padding: 4px;
+  padding: 10px; /* UX #9 — área de toque mínima 44px */
+  margin: -10px;
   -webkit-tap-highlight-color: transparent;
   line-height: 1;
 }
@@ -490,5 +534,81 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
   flex-direction: column;
   gap: 10px;
   padding-bottom: 8px;
+}
+
+/* UX #6 — separador visual antes de Nova Medição */
+.actions-separator {
+  height: 1px;
+  background: var(--bg-700);
+  margin: 2px 0;
+}
+
+/* UX #4 — toggle de detalhes técnicos */
+.tech-toggle {
+  background: none;
+  border: none;
+  color: var(--text-300);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 4px 0;
+  text-align: center;
+  width: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+.tech-toggle:hover { color: var(--text-100); }
+
+/* UX #13 — ajuda abaixo do campo */
+.field-hint {
+  font-size: 11px;
+  color: var(--text-300);
+  line-height: 1.4;
+}
+
+/* UX #5 — modal de confirmação */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 999;
+  padding: 24px;
+}
+
+.modal {
+  background: var(--bg-800);
+  border: 1px solid var(--bg-700);
+  border-radius: var(--radius-lg);
+  padding: 24px 20px 20px;
+  width: 100%;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: var(--text-100);
+  margin: 0;
+}
+
+.modal-body {
+  font-size: 14px;
+  color: var(--text-300);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.modal-actions .btn {
+  flex: 1;
 }
 </style>

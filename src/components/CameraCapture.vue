@@ -4,28 +4,37 @@ import { useDepthScale } from '../composables/useDepthScale.js'
 
 const emit = defineEmits(['captured'])
 
-// ─── Depth / scale composable ─────────────────────────────────────────────
 const { distanceCm, distanceHint, calcPixelsPerCm, guideRingDiameter } = useDepthScale()
 
 // ─── Camera state ─────────────────────────────────────────────────────────
-const videoRef   = ref(null)
+const videoRef     = ref(null)
 const hiddenCanvas = ref(null)
-const overlayRef = ref(null)
-let   mediaStream = null
+const overlayRef   = ref(null)
+let   mediaStream  = null
 
-const camState = ref('idle')   // idle | loading | ready | error | captured
-const camError = ref('')
+const camState  = ref('idle')  // idle | loading | ready | error | captured
+const camError  = ref('')
+const isFlashing = ref(false)  // UX #1 — flash de captura
 
 // ─── Guide ring ───────────────────────────────────────────────────────────
-const ringDiameter = ref(100)  // css px; updated by ResizeObserver
+const ringDiameter = ref(100)
 
 function updateRing() {
   if (!overlayRef.value) return
-  const w = overlayRef.value.clientWidth
-  ringDiameter.value = guideRingDiameter(w)
+  ringDiameter.value = guideRingDiameter(overlayRef.value.clientWidth)
 }
 
 let ro = null
+
+// ─── UX #12 — instruções de recovery específicas por SO ──────────────────
+const recoveryInstructions = computed(() => {
+  const ua = navigator.userAgent
+  if (/iPhone|iPad/.test(ua))
+    return 'iPhone/iPad: Ajustes → Safari → Câmera → Permitir'
+  if (/Android/.test(ua))
+    return 'Android: Configurações → Apps → Chrome → Permissões → Câmera'
+  return 'Verifique as permissões de câmera nas configurações do navegador.'
+})
 
 // ─── Camera init ──────────────────────────────────────────────────────────
 async function startCamera() {
@@ -33,15 +42,9 @@ async function startCamera() {
   camError.value = ''
   try {
     mediaStream = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-        width:  { ideal: 1920 },
-        height: { ideal: 1080 },
-      },
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false,
     })
-    // Transition to 'ready' first so the <video> element renders,
-    // then wait for the DOM update before setting srcObject.
     camState.value = 'ready'
     await nextTick()
     videoRef.value.srcObject = mediaStream
@@ -50,11 +53,11 @@ async function startCamera() {
   } catch (err) {
     camState.value = 'error'
     if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-      camError.value = 'Permissão de câmera negada. Habilite nas configurações do navegador.'
+      camError.value = 'Permissão de câmera negada.'
     } else if (err.name === 'NotFoundError') {
       camError.value = 'Nenhuma câmera encontrada neste dispositivo.'
     } else {
-      camError.value = `Erro ao acessar câmera: ${err.message}`
+      camError.value = `Não foi possível acessar a câmera.`
     }
   }
 }
@@ -64,22 +67,27 @@ function stopCamera() {
   mediaStream = null
 }
 
-// ─── Capture ──────────────────────────────────────────────────────────────
+// ─── Capture com flash (UX #1) ────────────────────────────────────────────
 function capture() {
+  // Flash visual
+  isFlashing.value = true
+  setTimeout(() => { isFlashing.value = false }, 300)
+
   const video  = videoRef.value
   const canvas = hiddenCanvas.value
-  const W = video.videoWidth
-  const H = video.videoHeight
-  canvas.width  = W
-  canvas.height = H
+  const W = video.videoWidth, H = video.videoHeight
+  canvas.width = W; canvas.height = H
   canvas.getContext('2d').drawImage(video, 0, 0, W, H)
 
-  const imageDataUrl  = canvas.toDataURL('image/jpeg', 0.92)
-  const ppc           = calcPixelsPerCm(W)
+  const imageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
+  const ppc          = calcPixelsPerCm(W)
 
-  camState.value = 'captured'
-  stopCamera()
-  emit('captured', { imageDataUrl, pixelsPerCm: ppc, distanceCm: distanceCm.value })
+  // Pequeno delay para o flash ser perceptível antes de trocar de tela
+  setTimeout(() => {
+    camState.value = 'captured'
+    stopCamera()
+    emit('captured', { imageDataUrl, pixelsPerCm: ppc, distanceCm: distanceCm.value })
+  }, 220)
 }
 
 // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -88,78 +96,66 @@ onMounted(() => {
   ro = new ResizeObserver(updateRing)
   if (overlayRef.value) ro.observe(overlayRef.value)
 })
-
-onUnmounted(() => {
-  stopCamera()
-  ro?.disconnect()
-})
-
+onUnmounted(() => { stopCamera(); ro?.disconnect() })
 watch(distanceCm, updateRing)
 </script>
 
 <template>
   <div class="cam-wrap">
 
-    <!-- ── Loading ──────────────────────────────────────────────────── -->
+    <!-- ── Loading ──────────────────────────────────────────────────────── -->
     <div v-if="camState === 'loading'" class="cam-state">
       <div class="spinner"></div>
       <p>Abrindo câmera…</p>
     </div>
 
-    <!-- ── Error ────────────────────────────────────────────────────── -->
+    <!-- ── Error ────────────────────────────────────────────────────────── -->
     <div v-else-if="camState === 'error'" class="cam-state cam-error">
       <span class="cam-error-icon">📵</span>
       <p class="cam-error-msg">{{ camError }}</p>
+      <!-- UX #12 — instrução específica por SO -->
+      <p class="cam-recovery">📋 {{ recoveryInstructions }}</p>
       <button class="btn btn-amber" @click="startCamera">Tentar Novamente</button>
     </div>
 
-    <!-- ── Camera ready ─────────────────────────────────────────────── -->
+    <!-- ── Camera ready ──────────────────────────────────────────────────── -->
     <template v-else-if="camState === 'ready'">
-      <!-- Live video -->
-      <video
-        ref="videoRef"
-        class="cam-video"
-        autoplay
-        muted
-        playsinline
-      />
+      <video ref="videoRef" class="cam-video" autoplay muted playsinline />
 
-      <!-- Guide overlay -->
+      <!-- UX #1 — flash de captura -->
+      <div class="capture-flash" :class="{ flashing: isFlashing }" />
+
+      <!-- Guide overlay — UX #2 crosshair removido -->
       <div class="cam-overlay" ref="overlayRef">
-        <!-- Guide ring representing 10 cm at current distance -->
         <div
           class="guide-ring"
-          :style="{
-            width:  ringDiameter + 'px',
-            height: ringDiameter + 'px',
-          }"
+          :style="{ width: ringDiameter + 'px', height: ringDiameter + 'px' }"
         >
-          <span class="guide-label">10 cm</span>
+          <span class="guide-label">≈ moeda R$1</span>
         </div>
 
-        <!-- Crosshair lines -->
-        <div class="crosshair-h"></div>
-        <div class="crosshair-v"></div>
-
-        <!-- Instruction banner -->
+        <!-- UX #3 — instrução com âncora concreta -->
         <div class="cam-instruction">
-          <span>📐 Aponte para a área da pele que receberá a tatuagem</span>
+          Encaixe o anel ao redor de uma moeda R$1, depois capture
         </div>
       </div>
 
       <!-- Bottom controls -->
       <div class="cam-controls">
-
-        <!-- Distance hint badge -->
-        <div class="dist-hint" :class="{ ok: distanceHint.ok }">
+        <!-- UX #10 — role="status" aria-live no hint de distância -->
+        <div
+          class="dist-hint"
+          :class="{ ok: distanceHint.ok }"
+          role="status"
+          aria-live="polite"
+        >
           {{ distanceHint.text }}
         </div>
 
-        <!-- Distance slider -->
         <div class="dist-row">
           <span class="dist-label">{{ distanceCm }} cm</span>
           <div class="dist-slider-wrap">
-            <span class="dist-min">15</span>
+            <span class="dist-icon">📱</span>
             <input
               type="range"
               class="dist-slider"
@@ -167,20 +163,27 @@ watch(distanceCm, updateRing)
               max="60"
               step="1"
               v-model.number="distanceCm"
+              aria-label="Distância do celular à superfície em centímetros"
+              :aria-valuetext="`${distanceCm} centímetros — ${distanceHint.text}`"
             />
-            <span class="dist-max">60 cm</span>
+            <span class="dist-icon">🖐</span>
           </div>
-          <span class="dist-desc">Distância celular ↔ pele</span>
+          <!-- UX #3 — âncoras de distância descritivas -->
+          <span class="dist-desc">perto ←&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ longe</span>
         </div>
 
-        <!-- Shutter -->
-        <button class="shutter-btn" @click="capture" :disabled="!distanceHint.ok">
-          <span class="shutter-inner"></span>
+        <!-- UX #10 — aria-label no shutter -->
+        <button
+          class="shutter-btn"
+          @click="capture"
+          :disabled="!distanceHint.ok"
+          aria-label="Capturar foto"
+        >
+          <span class="shutter-inner" aria-hidden="true"></span>
         </button>
       </div>
     </template>
 
-    <!-- Hidden canvas for capture -->
     <canvas ref="hiddenCanvas" style="display:none" />
   </div>
 </template>
@@ -195,7 +198,6 @@ watch(distanceCm, updateRing)
   background: #000;
 }
 
-/* ── Camera video ─────────────────────────────────────────────────────── */
 .cam-video {
   position: absolute;
   inset: 0;
@@ -204,7 +206,19 @@ watch(distanceCm, updateRing)
   object-fit: cover;
 }
 
-/* ── Loading / error states ───────────────────────────────────────────── */
+/* ── UX #1 — Flash de captura ─────────────────────────────────────────── */
+.capture-flash {
+  position: absolute;
+  inset: 0;
+  background: #fff;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 50;
+  transition: opacity 0.08s ease-out;
+}
+.capture-flash.flashing { opacity: 0.85; }
+
+/* ── Loading / error ──────────────────────────────────────────────────── */
 .cam-state {
   flex: 1;
   display: flex;
@@ -217,9 +231,21 @@ watch(distanceCm, updateRing)
   text-align: center;
 }
 
-.cam-error { color: #fca5a5; }
+.cam-error     { color: #fca5a5; }
 .cam-error-icon { font-size: 48px; }
 .cam-error-msg  { font-size: 15px; line-height: 1.5; }
+
+/* UX #12 — caixa de recovery */
+.cam-recovery {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-100);
+  background: var(--bg-700);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  max-width: 280px;
+  text-align: left;
+}
 
 .spinner {
   width: 40px; height: 40px;
@@ -230,7 +256,7 @@ watch(distanceCm, updateRing)
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Overlay ──────────────────────────────────────────────────────────── */
+/* ── Overlay — UX #2 crosshair removido ──────────────────────────────── */
 .cam-overlay {
   position: absolute;
   inset: 0;
@@ -240,7 +266,6 @@ watch(distanceCm, updateRing)
   pointer-events: none;
 }
 
-/* Guide ring */
 .guide-ring {
   position: relative;
   border-radius: 50%;
@@ -252,38 +277,29 @@ watch(distanceCm, updateRing)
   justify-content: center;
 }
 
+/* UX #3 — label mais descritivo */
 .guide-label {
   font-size: 11px;
   font-weight: 700;
-  color: rgba(245,158,11,0.9);
-  text-shadow: 0 1px 3px rgba(0,0,0,0.9);
-  pointer-events: none;
+  color: rgba(245,158,11,0.95);
+  text-shadow: 0 1px 4px rgba(0,0,0,0.95);
 }
 
-/* Crosshair */
-.crosshair-h,
-.crosshair-v {
-  position: absolute;
-  background: rgba(255,255,255,0.25);
-}
-.crosshair-h { width: 100%; height: 1px; top: 50%; }
-.crosshair-v { height: 100%; width: 1px; left: 50%; }
-
-/* Instruction banner at top */
+/* UX #3 — instrução com âncora concreta, sem whitespace:nowrap */
 .cam-instruction {
   position: absolute;
   top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
-  white-space: nowrap;
-  background: rgba(15,23,42,0.75);
+  left: 16px;
+  right: 16px;
+  text-align: center;
+  background: rgba(15,23,42,0.78);
   backdrop-filter: blur(8px);
   border: 1px solid rgba(255,255,255,0.1);
   border-radius: 20px;
-  padding: 6px 14px;
-  font-size: 12px;
+  padding: 7px 16px;
+  font-size: 13px;
+  line-height: 1.4;
   color: var(--text-100);
-  pointer-events: none;
 }
 
 /* ── Bottom controls ──────────────────────────────────────────────────── */
@@ -300,7 +316,6 @@ watch(distanceCm, updateRing)
   gap: 10px;
 }
 
-/* Distance hint */
 .dist-hint {
   font-size: 12px;
   font-weight: 600;
@@ -317,7 +332,6 @@ watch(distanceCm, updateRing)
   color: #86efac;
 }
 
-/* Distance slider row */
 .dist-row {
   width: 100%;
   display: flex;
@@ -333,10 +347,8 @@ watch(distanceCm, updateRing)
   line-height: 1;
 }
 
-.dist-desc {
-  font-size: 11px;
-  color: var(--text-300);
-}
+/* UX #3 — ícones de âncora no lugar de "15" / "60 cm" */
+.dist-icon { font-size: 16px; }
 
 .dist-slider-wrap {
   width: 100%;
@@ -345,10 +357,9 @@ watch(distanceCm, updateRing)
   gap: 8px;
 }
 
-.dist-min, .dist-max {
+.dist-desc {
   font-size: 11px;
   color: var(--text-300);
-  white-space: nowrap;
 }
 
 .dist-slider {
@@ -371,10 +382,8 @@ watch(distanceCm, updateRing)
   box-shadow: 0 1px 4px rgba(0,0,0,0.5);
 }
 
-/* Shutter button */
 .shutter-btn {
-  width: 68px;
-  height: 68px;
+  width: 68px; height: 68px;
   border-radius: 50%;
   background: rgba(255,255,255,0.15);
   border: 3px solid rgba(255,255,255,0.8);
@@ -386,17 +395,11 @@ watch(distanceCm, updateRing)
   -webkit-tap-highlight-color: transparent;
   margin-top: 4px;
 }
-
-.shutter-btn:active { transform: scale(0.9); }
-
-.shutter-btn:disabled {
-  opacity: 0.35;
-  cursor: not-allowed;
-}
+.shutter-btn:active   { transform: scale(0.9); }
+.shutter-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 .shutter-inner {
-  width: 50px;
-  height: 50px;
+  width: 50px; height: 50px;
   border-radius: 50%;
   background: rgba(255,255,255,0.9);
 }
