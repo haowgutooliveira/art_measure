@@ -1,4 +1,4 @@
-# TattMeasure
+# ArtMeasure
 
 Aplicação Web PWA para medir áreas de tatuagem usando uma foto com objeto de referência.
 

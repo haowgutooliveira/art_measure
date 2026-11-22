@@ -14,8 +14,8 @@ export default defineConfig({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'icon-192.png', 'icon-512.png'],
       manifest: {
-        name: 'TattMeasure',
-        short_name: 'TattMeasure',
+        name: 'ArtMeasure',
+        short_name: 'ArtMeasure',
         description: 'Meça a área da tatuagem com precisão usando seu smartphone',
         theme_color: '#0f172a',
         background_color: '#0f172a',

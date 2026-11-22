@@ -72,7 +72,7 @@ const STEPS = ['Câmera', 'Desenho', 'Orçamento']
       </div>
       <div class="logo">
         <span class="logo-icon">🖋</span>
-        <span class="logo-text">Tatt<span class="logo-accent">Measure</span></span>
+        <span class="logo-text">Art<span class="logo-accent">Measure</span></span>
       </div>
       <div class="header-right"></div>
     </header>
