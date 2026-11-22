@@ -51,7 +51,7 @@ export function useShoelaceArea(points, pixelsPerCm) {
     const w = widthCm.toFixed(1)
     const h = heightCm.toFixed(1)
 
-    let msg = `🎨 *ArtMeasure — Medidas da Tatuagem*\n\n`
+    let msg = `🎨 *ArtMeasure — Medidas da Área*\n\n`
     if (clientName?.trim()) msg += `👤 *Cliente:* ${clientName.trim()}\n`
     msg += `📐 *Área:* ${area} cm²\n`
     msg += `📏 *Dimensões:* ${w} cm × ${h} cm\n`
