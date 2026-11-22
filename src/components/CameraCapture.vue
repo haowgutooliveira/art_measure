@@ -131,12 +131,11 @@ watch(distanceCm, updateRing)
           class="guide-ring"
           :style="{ width: ringDiameter + 'px', height: ringDiameter + 'px' }"
         >
-          <span class="guide-label">≈ moeda R$1</span>
+          <span class="guide-label">10 cm</span>
         </div>
 
-        <!-- UX #3 — instrução com âncora concreta -->
         <div class="cam-instruction">
-          Encaixe o anel ao redor de uma moeda R$1, depois capture
+          Ajuste a distância até o anel ter ~10 cm e capture
         </div>
       </div>
 

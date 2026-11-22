@@ -155,7 +155,7 @@ const STEPS = ['Câmera', 'Desenho', 'Resultado']
           <div class="how-num">1</div>
           <div>
             <strong>Câmera</strong>
-            <p>Aponte para a superfície e encaixe o anel ao redor de uma moeda R$1. O app usa a geometria da câmera para calcular a escala real.</p>
+            <p>Aponte para a superfície e ajuste a distância até o anel de referência ter 10 cm. O app usa a geometria da câmera para calcular a escala real.</p>
           </div>
         </div>
         <div class="how-item">
