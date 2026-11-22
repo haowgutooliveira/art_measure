@@ -420,8 +420,16 @@ watch(() => props.imageDataUrl, (src) => { bgImage.src = src })
     <div v-if="allPoints.length === 0 && !isDrawing" class="tc-hint">
       <div class="tc-hint-box">
         <span class="tc-hint-icon">✏️</span>
-        <span>Risque o contorno da área da tatuagem</span>
+        <!-- UX #8 — texto generalizado -->
+        <span>Risque o contorno da área da arte</span>
+        <span class="tc-hint-sub">Levante o dedo para reposicionar</span>
       </div>
+    </div>
+
+    <!-- UX #11 — contador de traços, visível após o 1º traço -->
+    <div v-if="strokes.length > 0 && !isDrawing && allPoints.length < 3" class="tc-stroke-hint">
+      {{ strokes.length }} {{ strokes.length === 1 ? 'traço' : 'traços' }} — continue riscando ou
+      <strong>levante o dedo para reposicionar</strong>
     </div>
 
     <!-- CTA flutuante: aparece depois de riscar -->
@@ -437,8 +445,9 @@ watch(() => props.imageDataUrl, (src) => { bgImage.src = src })
 
     <!-- Bottom action bar -->
     <div class="tc-bar">
+      <!-- UX #3 — label explícito "traço" para desfazer -->
       <button class="btn btn-ghost btn-sm" :disabled="allPoints.length === 0" @click="undo">
-        ↩ Desfazer
+        ↩ Desfazer traço
       </button>
       <button class="btn btn-danger btn-sm" :disabled="allPoints.length === 0" @click="clear">
         🗑 Limpar tudo
@@ -490,8 +499,30 @@ watch(() => props.imageDataUrl, (src) => { bgImage.src = src })
   max-width: 220px;
 }
 
-.tc-hint-icon {
-  font-size: 28px;
+.tc-hint-icon { font-size: 28px; }
+
+.tc-hint-sub {
+  font-size: 11px;
+  color: var(--bg-600);
+  margin-top: 2px;
+}
+
+/* UX #11 — contador de traços */
+.tc-stroke-hint {
+  position: absolute;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+  background: rgba(15,23,42,0.75);
+  backdrop-filter: blur(6px);
+  border: 1px solid var(--bg-600);
+  border-radius: 20px;
+  padding: 5px 14px;
+  font-size: 12px;
+  color: var(--text-300);
+  pointer-events: none;
+  z-index: 10;
 }
 
 /* ── Floating CTA ─────────────────────────────────────────────────────── */
