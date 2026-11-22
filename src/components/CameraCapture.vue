@@ -1,27 +1,34 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
 import { useARCamera } from '../composables/useARCamera.js'
-import { useDepthScale } from '../composables/useDepthScale.js'
 
 const emit = defineEmits(['captured'])
 
-// ─── Composables ──────────────────────────────────────────────────────────────
 const ar = useARCamera()
-const fb = useDepthScale()   // fallback: manual slider
 
-// ─── State machine ────────────────────────────────────────────────────────────
-// States:  'checking' | 'ar-active' | 'capturing' | 'fb-loading' | 'fb-ready' | 'error' | 'done'
+// ─── State ────────────────────────────────────────────────────────────────────
+// 'checking' | 'ar-active' | 'capturing' | 'fb-ready' | 'error' | 'done'
 const camState   = ref('checking')
 const camError   = ref('')
 const isFlashing = ref(false)
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
-const arOverlayRef  = ref(null)   // full-screen AR overlay (<Teleport> target)
-const fbVideoRef    = ref(null)   // fallback <video>
-const hiddenCanvas  = ref(null)
-let   fbStream      = null
+const arOverlayRef = ref(null)
+const fbVideoRef   = ref(null)
+const hiddenCanvas = ref(null)
+let   fbStream     = null
 
-// ─── OS-specific recovery instructions ───────────────────────────────────────
+// ─── Fallback: fixed distance ─────────────────────────────────────────────────
+const FB_DISTANCE_CM = 25   // typical phone-to-skin distance for a reference shot
+
+/** pixelsPerCm using pinhole model at a fixed 25 cm */
+function fbCalcPixelsPerCm(imageWidthPx) {
+  const H_FOV_RAD = (65 * Math.PI) / 180
+  const focalPx   = imageWidthPx / (2 * Math.tan(H_FOV_RAD / 2))
+  return focalPx / FB_DISTANCE_CM
+}
+
+// ─── OS recovery hint ─────────────────────────────────────────────────────────
 const recoveryInstructions = computed(() => {
   const ua = navigator.userAgent
   if (/iPhone|iPad/.test(ua)) return 'iPhone/iPad: Ajustes → Safari → Câmera → Permitir'
@@ -29,24 +36,19 @@ const recoveryInstructions = computed(() => {
   return 'Verifique as permissões de câmera nas configurações do navegador.'
 })
 
-// ─── Distance display ─────────────────────────────────────────────────────────
-const displayDist = computed(() => {
-  if (camState.value === 'ar-active') return ar.distanceCm.value
-  return fb.distanceCm.value
-})
-
+// ─── Distance status (AR only) ────────────────────────────────────────────────
 const distStatus = computed(() => {
-  const d = displayDist.value
-  if (d === null || d === undefined) return { text: 'Apontando para a área…', ok: false }
-  if (d < 10)  return { text: 'Muito perto', ok: false }
-  if (d > 80)  return { text: 'Muito longe', ok: false }
-  return { text: 'Distância ideal ✓', ok: true }
+  if (camState.value !== 'ar-active') return { ok: true }
+  const d = ar.distanceCm.value
+  if (d === null) return { text: 'Apontando para a área…', ok: false }
+  if (d < 10)    return { text: 'Muito perto', ok: false }
+  if (d > 80)    return { text: 'Muito longe', ok: false }
+  return { text: null, ok: true }
 })
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 onMounted(async () => {
   await ar.checkSupport()
-
   if (ar.isSupported.value) {
     await startAR()
   } else {
@@ -63,70 +65,53 @@ onUnmounted(() => {
 async function startAR() {
   camState.value = 'checking'
   try {
-    // Ensure overlay element is in the DOM before XR session requests it
     await nextTick()
     await ar.start(arOverlayRef.value)
     camState.value = 'ar-active'
-  } catch (err) {
-    // AR failed — fall back to manual slider
+  } catch {
     await startFallback()
   }
 }
 
 async function captureAR() {
   if (!distStatus.value.ok) return
-
   isFlashing.value = true
   setTimeout(() => { isFlashing.value = false }, 300)
-
   camState.value = 'capturing'
 
   try {
-    // Lock distance and release XR camera
-    // We'll capture the actual image width after getUserMedia
-    const tempWidth = 1920
-    const { lockedDistanceCm, pixelsPerCm: tempPpc } = await ar.lockAndRelease(tempWidth)
+    const { lockedDistanceCm, pixelsPerCm: tempPpc } = await ar.lockAndRelease(1920)
 
-    // Now capture via getUserMedia
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
       audio: false,
     })
-
     const video = document.createElement('video')
-    video.srcObject = stream
-    video.muted = true
-    video.playsInline = true
+    video.srcObject = stream; video.muted = true; video.playsInline = true
     await video.play()
-
-    // Wait one more frame for video to have pixels
     await new Promise(r => requestAnimationFrame(r))
 
     const W = video.videoWidth || 1920
     const H = video.videoHeight || 1080
-
     const canvas = hiddenCanvas.value
-    canvas.width  = W
-    canvas.height = H
+    canvas.width = W; canvas.height = H
     canvas.getContext('2d').drawImage(video, 0, 0, W, H)
-
     stream.getTracks().forEach(t => t.stop())
 
     const imageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-    // Recalculate ppc with actual image width
     const pixelsPerCm  = ar.calcPixelsPerCm(W, lockedDistanceCm)
 
     camState.value = 'done'
     emit('captured', { imageDataUrl, pixelsPerCm, distanceCm: lockedDistanceCm })
-  } catch (err) {
-    camError.value  = 'Não foi possível capturar a foto.'
-    camState.value  = 'error'
+  } catch {
+    camError.value = 'Não foi possível capturar a foto.'
+    camState.value = 'error'
   }
 }
 
 // ─── Fallback mode ────────────────────────────────────────────────────────────
 async function startFallback() {
-  camState.value = 'fb-loading'
+  camState.value = 'checking'
   camError.value = ''
   try {
     fbStream = await navigator.mediaDevices.getUserMedia({
@@ -165,51 +150,47 @@ function captureFallback() {
   canvas.getContext('2d').drawImage(video, 0, 0, W, H)
 
   const imageDataUrl = canvas.toDataURL('image/jpeg', 0.92)
-  const pixelsPerCm  = fb.calcPixelsPerCm(W)
+  const pixelsPerCm  = fbCalcPixelsPerCm(W)
 
   setTimeout(() => {
     camState.value = 'done'
     stopFallback()
-    emit('captured', { imageDataUrl, pixelsPerCm, distanceCm: fb.distanceCm.value })
+    emit('captured', { imageDataUrl, pixelsPerCm, distanceCm: FB_DISTANCE_CM })
   }, 220)
 }
 
 function retryCamera() {
-  if (ar.isSupported.value) {
-    startAR()
-  } else {
-    startFallback()
-  }
+  if (ar.isSupported.value) startAR()
+  else startFallback()
 }
 </script>
 
 <template>
-  <!-- ── AR overlay (Teleport so XR dom-overlay works) ──────────────────────── -->
+  <!-- ── AR overlay ─────────────────────────────────────────────────────────── -->
   <Teleport to="body">
     <div
       v-if="camState === 'ar-active' || camState === 'capturing'"
       ref="arOverlayRef"
       class="ar-overlay"
     >
-      <!-- Flash -->
       <div class="capture-flash" :class="{ flashing: isFlashing }" />
 
-      <!-- Reticle — centred crosshair pointing at the surface -->
-      <div class="ar-reticle" :class="{ hit: ar.hasHit.value }">
-        <span class="reticle-h" /><span class="reticle-v" />
-        <span class="reticle-ring" />
-      </div>
-
-      <!-- Distance badge -->
-      <div class="ar-dist-badge" :class="{ ok: distStatus.ok }">
-        <span v-if="displayDist !== null" class="dist-num metric">{{ displayDist }}</span>
-        <span v-if="displayDist !== null" class="dist-unit">cm</span>
-        <span class="dist-status">{{ distStatus.text }}</span>
+      <!-- Distance badge (top center) -->
+      <div v-if="ar.distanceCm.value !== null" class="ar-dist-badge" :class="{ ok: distStatus.ok }">
+        <span class="dist-num metric">{{ ar.distanceCm.value }}</span>
+        <span class="dist-unit">cm</span>
+        <span v-if="distStatus.text" class="dist-status">— {{ distStatus.text }}</span>
       </div>
 
       <!-- Instruction -->
       <div class="ar-instruction">
-        Aponte a câmera para a área a ser tatuada
+        Aponte o ponto para a área a ser tatuada
+      </div>
+
+      <!-- Reticle — centred on screen -->
+      <div class="ar-reticle" :class="{ hit: ar.hasHit.value }">
+        <span class="reticle-h" /><span class="reticle-v" />
+        <span class="reticle-ring" />
       </div>
 
       <!-- Shutter -->
@@ -226,18 +207,17 @@ function retryCamera() {
     </div>
   </Teleport>
 
-  <!-- ── Main component shell ───────────────────────────────────────────────── -->
+  <!-- ── Component shell ────────────────────────────────────────────────────── -->
   <div class="cam-wrap">
 
-    <!-- ── Checking / AR active (placeholder while Teleport overlay runs) ───── -->
-    <div v-if="camState === 'checking' || camState === 'ar-active' || camState === 'capturing'" class="cam-state">
+    <!-- Loading / capturing -->
+    <div v-if="camState === 'checking' || camState === 'capturing' || camState === 'ar-active'" class="cam-state">
       <div class="spinner" />
       <p v-if="camState === 'checking'">Iniciando câmera…</p>
       <p v-else-if="camState === 'capturing'">Capturando…</p>
-      <!-- AR active: the Teleport overlay handles everything; show nothing here -->
     </div>
 
-    <!-- ── Error ───────────────────────────────────────────────────────────── -->
+    <!-- Error -->
     <div v-else-if="camState === 'error'" class="cam-state cam-error">
       <span class="cam-error-icon">📵</span>
       <p class="cam-error-msg">{{ camError }}</p>
@@ -245,60 +225,29 @@ function retryCamera() {
       <button class="btn btn-amber" @click="retryCamera">Tentar Novamente</button>
     </div>
 
-    <!-- ── Fallback: manual video + slider ────────────────────────────────── -->
-    <template v-else-if="camState === 'fb-loading' || camState === 'fb-ready'">
+    <!-- Fallback: plain camera + reticle, no slider -->
+    <template v-else-if="camState === 'fb-ready'">
+      <video ref="fbVideoRef" class="cam-video" autoplay muted playsinline />
 
-      <div v-if="camState === 'fb-loading'" class="cam-state">
-        <div class="spinner" />
-        <p>Abrindo câmera…</p>
+      <div class="capture-flash" :class="{ flashing: isFlashing }" />
+
+      <!-- Same reticle as AR mode, but no distance badge -->
+      <div class="cam-overlay">
+        <div class="ar-instruction fb-instruction">
+          Aponte o ponto para a área a ser tatuada e capture
+        </div>
+
+        <div class="ar-reticle hit">
+          <span class="reticle-h" /><span class="reticle-v" />
+          <span class="reticle-ring" />
+        </div>
       </div>
 
-      <template v-else>
-        <video ref="fbVideoRef" class="cam-video" autoplay muted playsinline />
-
-        <!-- Flash -->
-        <div class="capture-flash" :class="{ flashing: isFlashing }" />
-
-        <!-- Bottom controls -->
-        <div class="cam-controls">
-          <div
-            class="dist-hint"
-            :class="{ ok: fb.distanceHint.value.ok }"
-            role="status"
-            aria-live="polite"
-          >
-            {{ fb.distanceHint.value.text }}
-          </div>
-
-          <div class="dist-row">
-            <span class="dist-label metric">{{ fb.distanceCm.value }} cm</span>
-            <div class="dist-slider-wrap">
-              <span class="dist-icon">📱</span>
-              <input
-                type="range"
-                class="dist-slider"
-                min="15"
-                max="60"
-                step="1"
-                v-model.number="fb.distanceCm.value"
-                aria-label="Distância do celular à superfície em centímetros"
-                :aria-valuetext="`${fb.distanceCm.value} centímetros — ${fb.distanceHint.value.text}`"
-              />
-              <span class="dist-icon">🖐</span>
-            </div>
-            <span class="dist-desc">perto ←&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ longe</span>
-          </div>
-
-          <button
-            class="shutter-btn"
-            @click="captureFallback"
-            :disabled="!fb.distanceHint.value.ok"
-            aria-label="Capturar foto"
-          >
-            <span class="shutter-inner" aria-hidden="true" />
-          </button>
-        </div>
-      </template>
+      <div class="cam-controls">
+        <button class="shutter-btn" aria-label="Capturar foto" @click="captureFallback">
+          <span class="shutter-inner" aria-hidden="true" />
+        </button>
+      </div>
     </template>
 
     <canvas ref="hiddenCanvas" style="display:none" />
@@ -315,7 +264,6 @@ function retryCamera() {
   overflow: hidden;
   background: #000;
 }
-
 .cam-video {
   position: absolute;
   inset: 0;
@@ -336,9 +284,9 @@ function retryCamera() {
   padding: 32px;
   text-align: center;
 }
-.cam-error         { color: #fca5a5; }
-.cam-error-icon    { font-size: 48px; }
-.cam-error-msg     { font-size: 15px; line-height: 1.5; }
+.cam-error      { color: #fca5a5; }
+.cam-error-icon { font-size: 48px; }
+.cam-error-msg  { font-size: 15px; line-height: 1.5; }
 .cam-recovery {
   font-size: 13px;
   line-height: 1.6;
@@ -358,7 +306,7 @@ function retryCamera() {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Capture flash (shared) ───────────────────────────────────────────────── */
+/* ── Flash ────────────────────────────────────────────────────────────────── */
 .capture-flash {
   position: fixed;
   inset: 0;
@@ -379,13 +327,59 @@ function retryCamera() {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  /* transparent — XR camera passthrough is behind */
   pointer-events: none;
 }
-/* Re-enable pointer events only on interactive children */
 .ar-overlay .ar-controls,
-.ar-overlay .shutter-btn {
-  pointer-events: auto;
+.ar-overlay .shutter-btn { pointer-events: auto; }
+
+/* ── Distance badge ───────────────────────────────────────────────────────── */
+.ar-dist-badge {
+  position: fixed;
+  top: max(24px, env(safe-area-inset-top, 24px));
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  background: rgba(2, 30, 45, 0.82);
+  backdrop-filter: blur(10px);
+  border: 1px solid rgba(239, 68, 68, 0.5);
+  border-radius: 20px;
+  padding: 6px 16px;
+  transition: border-color 0.25s;
+  pointer-events: none;
+  white-space: nowrap;
+}
+.ar-dist-badge.ok { border-color: rgba(46, 196, 182, 0.6); }
+
+.dist-num {
+  font-size: 24px;
+  font-weight: 700;
+  color: #fca5a5;
+  line-height: 1;
+  transition: color 0.25s;
+}
+.ar-dist-badge.ok .dist-num { color: var(--accent-amber); }
+.dist-unit   { font-size: 13px; font-weight: 600; color: var(--text-300); }
+.dist-status { font-size: 12px; color: #fca5a5; transition: color 0.25s; }
+.ar-dist-badge.ok .dist-status { color: #2EC4B6; }
+
+/* ── Instruction ──────────────────────────────────────────────────────────── */
+.ar-instruction {
+  position: fixed;
+  bottom: calc(140px + env(safe-area-inset-bottom, 0px));
+  left: 16px;
+  right: 16px;
+  text-align: center;
+  background: rgba(2, 30, 45, 0.78);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 20px;
+  padding: 8px 20px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--text-100);
+  pointer-events: none;
 }
 
 /* ── Reticle ──────────────────────────────────────────────────────────────── */
@@ -411,7 +405,7 @@ function retryCamera() {
 
 .reticle-h, .reticle-v {
   position: absolute;
-  background: rgba(255, 183, 3, 0.85);
+  background: rgba(255, 183, 3, 0.75);
   border-radius: 1px;
 }
 .reticle-h { width: 24px; height: 2px; }
@@ -419,70 +413,7 @@ function retryCamera() {
 .ar-reticle.hit .reticle-h,
 .ar-reticle.hit .reticle-v { background: #FFB703; }
 
-/* ── Distance badge ───────────────────────────────────────────────────────── */
-.ar-dist-badge {
-  position: fixed;
-  top: max(24px, env(safe-area-inset-top, 24px));
-  left: 50%;
-  transform: translateX(-50%);
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-  background: rgba(2, 30, 45, 0.82);
-  backdrop-filter: blur(10px);
-  border: 1px solid rgba(239, 68, 68, 0.5);
-  border-radius: 20px;
-  padding: 6px 16px;
-  transition: border-color 0.25s, background 0.25s;
-  pointer-events: none;
-}
-.ar-dist-badge.ok {
-  border-color: rgba(46, 196, 182, 0.6);
-  background: rgba(2, 30, 45, 0.82);
-}
-
-.dist-num {
-  font-size: 24px;
-  font-weight: 700;
-  color: #fca5a5;
-  line-height: 1;
-  transition: color 0.25s;
-}
-.ar-dist-badge.ok .dist-num { color: var(--accent-amber); }
-
-.dist-unit {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text-300);
-  margin-right: 6px;
-}
-.dist-status {
-  font-size: 12px;
-  font-weight: 600;
-  color: #fca5a5;
-  transition: color 0.25s;
-}
-.ar-dist-badge.ok .dist-status { color: #2EC4B6; }
-
-/* ── AR instruction ───────────────────────────────────────────────────────── */
-.ar-instruction {
-  position: fixed;
-  bottom: calc(140px + env(safe-area-inset-bottom, 0px));
-  left: 16px;
-  right: 16px;
-  text-align: center;
-  background: rgba(2, 30, 45, 0.78);
-  backdrop-filter: blur(8px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
-  padding: 8px 20px;
-  font-size: 14px;
-  line-height: 1.4;
-  color: var(--text-100);
-  pointer-events: none;
-}
-
-/* ── AR controls ──────────────────────────────────────────────────────────── */
+/* ── AR shutter bar ───────────────────────────────────────────────────────── */
 .ar-controls {
   position: fixed;
   bottom: 0;
@@ -494,74 +425,36 @@ function retryCamera() {
   background: linear-gradient(transparent, rgba(2, 30, 45, 0.88) 40%);
 }
 
-/* ── Fallback bottom controls ─────────────────────────────────────────────── */
+/* ── Fallback overlay ─────────────────────────────────────────────────────── */
+.cam-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.fb-instruction {
+  position: absolute;
+  bottom: calc(130px + env(safe-area-inset-bottom, 0px));
+  left: 16px;
+  right: 16px;
+}
+
+/* ── Fallback shutter bar ─────────────────────────────────────────────────── */
 .cam-controls {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
-  padding: 12px 20px calc(20px + env(safe-area-inset-bottom, 0px));
-  background: linear-gradient(transparent, rgba(2, 30, 45, 0.92) 30%);
+  padding: 16px 20px calc(24px + env(safe-area-inset-bottom, 0px));
   display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
+  justify-content: center;
+  background: linear-gradient(transparent, rgba(2, 30, 45, 0.88) 40%);
 }
 
-.dist-hint {
-  font-size: 12px;
-  font-weight: 600;
-  padding: 4px 14px;
-  border-radius: 20px;
-  background: rgba(239, 68, 68, 0.2);
-  border: 1px solid rgba(239, 68, 68, 0.4);
-  color: #fca5a5;
-  transition: all 0.2s;
-}
-.dist-hint.ok {
-  background: rgba(46, 196, 182, 0.2);
-  border-color: rgba(46, 196, 182, 0.4);
-  color: #2EC4B6;
-}
-
-.dist-row {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-.dist-label { font-size: 20px; font-weight: 800; color: var(--accent-amber); line-height: 1; }
-.dist-icon  { font-size: 16px; }
-.dist-desc  { font-size: 11px; color: var(--text-300); }
-
-.dist-slider-wrap {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.dist-slider {
-  flex: 1;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--bg-600);
-  outline: none;
-  cursor: pointer;
-}
-.dist-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 22px; height: 22px;
-  border-radius: 50%;
-  background: var(--accent-amber);
-  cursor: pointer;
-  border: 2px solid #fff;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
-}
-
-/* ── Shutter button (shared) ──────────────────────────────────────────────── */
+/* ── Shutter button ───────────────────────────────────────────────────────── */
 .shutter-btn {
   width: 72px; height: 72px;
   border-radius: 50%;
@@ -576,7 +469,6 @@ function retryCamera() {
 }
 .shutter-btn:active   { transform: scale(0.9); }
 .shutter-btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
 .shutter-inner {
   width: 54px; height: 54px;
   border-radius: 50%;
