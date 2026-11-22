@@ -73,6 +73,8 @@ export function useARCamera() {
     if (!_session) return
     _rafHandle = _session.requestAnimationFrame(_frame)
 
+    if (!_hitTestSource) return   // source being replaced — skip frame
+
     const hits = frame.getHitTestResults(_hitTestSource)
     if (hits.length > 0) {
       const hitPose  = hits[0].getPose(_localSpace)
@@ -86,6 +88,52 @@ export function useARCamera() {
       }
     } else {
       hasHit.value = false
+    }
+  }
+
+  // ── Update ray when reticle moves ──────────────────────────────────────────
+  /**
+   * Recreates the hit test source to fire a ray through the given screen
+   * position rather than the viewer centre. Call this after the reticle
+   * is dragged (debounced — requestHitTestSource is async).
+   *
+   * @param {number} screenX   – reticle x in CSS pixels
+   * @param {number} screenY   – reticle y in CSS pixels
+   * @param {number} screenW   – viewport width in CSS pixels
+   * @param {number} screenH   – viewport height in CSS pixels
+   */
+  async function updateRay(screenX, screenY, screenW, screenH) {
+    if (!_session || !_localSpace) return
+
+    // Normalised device coordinates: centre = (0,0), range [-1, 1]
+    const nx =  (screenX / screenW - 0.5) * 2
+    const ny = -((screenY / screenH - 0.5) * 2)   // Y is flipped in NDC
+
+    // Ray direction in camera/viewer space (camera looks along -Z)
+    // We approximate a symmetric 65° FOV for both axes.
+    const halfFov = H_FOV_RAD / 2
+    const t = Math.tan(halfFov)
+    const dx = nx * t, dy = ny * t, dz = -1
+    const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
+
+    const ray = new XRRay(
+      { x: 0, y: 0, z: 0, w: 1 },                         // origin: viewer position
+      { x: dx / len, y: dy / len, z: dz / len, w: 0 },    // direction
+    )
+
+    const viewerSpace = await _session.requestReferenceSpace('viewer').catch(() => null)
+    if (!viewerSpace) return
+
+    const oldSource = _hitTestSource
+    _hitTestSource  = null    // pause frame loop usage during swap
+
+    try {
+      const newSource = await _session.requestHitTestSource({ space: viewerSpace, offsetRay: ray })
+      oldSource?.cancel()
+      _hitTestSource = newSource
+    } catch {
+      // If new source fails, restore old one to keep measuring something
+      _hitTestSource = oldSource
     }
   }
 
@@ -152,5 +200,6 @@ export function useARCamera() {
     stop,
     lockAndRelease,
     calcPixelsPerCm,
+    updateRay,
   }
 }

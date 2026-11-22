@@ -44,14 +44,24 @@ const recoveryInstructions = computed(() => {
   return 'Verifique as permissões de câmera nas configurações do navegador.'
 })
 
-// ─── Distance status (AR) ─────────────────────────────────────────────────────
-const distStatus = computed(() => {
-  if (camState.value !== 'ar-active') return { ok: true, text: null }
+// ─── Distance display helpers ─────────────────────────────────────────────────
+/** Shows cm for < 100 cm, metres with 1 decimal for >= 100 cm */
+const distDisplay = computed(() => {
   const d = ar.distanceCm.value
-  if (d === null) return { ok: false, text: 'Apontando para a área…' }
-  if (d < 10)    return { ok: false, text: 'Muito perto' }
-  if (d > 80)    return { ok: false, text: 'Muito longe' }
-  return { ok: true, text: null }
+  if (d === null) return null
+  if (d < 100) return { value: String(d), unit: 'cm' }
+  return { value: (d / 100).toFixed(1), unit: 'm' }
+})
+
+// ─── Distance status (AR) ─────────────────────────────────────────────────────
+// No hard blocking — only a soft warning below 8 cm (too close to focus).
+// Any distance is allowed for capture so users can photograph large areas.
+const distStatus = computed(() => {
+  if (camState.value !== 'ar-active') return { ok: true, warn: false, text: null }
+  const d = ar.distanceCm.value
+  if (d === null) return { ok: false, warn: false, text: 'Apontando para a área…' }
+  if (d < 8)     return { ok: false, warn: true,  text: 'Muito perto' }
+  return { ok: true, warn: false, text: null }
 })
 
 // ─── Watch XR session end ─────────────────────────────────────────────────────
@@ -192,6 +202,8 @@ function retryCamera() {
 }
 
 // ─── Draggable reticle ────────────────────────────────────────────────────────
+let _rayDebounce = null
+
 function onPointerDown(e) {
   isDragging.value = true
   moveReticle(e)
@@ -203,11 +215,27 @@ function onPointerMove(e) {
 }
 function onPointerUp() {
   isDragging.value = false
+  // Update the XR ray once the user lifts their finger
+  _scheduleRayUpdate()
+}
+function onPointerCancel() {
+  isDragging.value = false
 }
 function moveReticle(e) {
   const src = e.touches ? e.touches[0] : e
   reticleX.value = src.clientX
   reticleY.value = src.clientY
+}
+function _scheduleRayUpdate() {
+  clearTimeout(_rayDebounce)
+  _rayDebounce = setTimeout(() => {
+    if (camState.value === 'ar-active') {
+      ar.updateRay(
+        reticleX.value, reticleY.value,
+        window.innerWidth, window.innerHeight,
+      )
+    }
+  }, 80)
 }
 </script>
 
@@ -221,7 +249,7 @@ function moveReticle(e) {
       @pointerdown="onPointerDown"
       @pointermove="onPointerMove"
       @pointerup="onPointerUp"
-      @pointercancel="onPointerUp"
+      @pointercancel="onPointerCancel"
       @touchstart.passive="onPointerDown"
       @touchmove.prevent="onPointerMove"
       @touchend="onPointerUp"
@@ -232,14 +260,13 @@ function moveReticle(e) {
       <div
         v-if="camState === 'ar-active'"
         class="ar-dist-badge"
-        :class="{ ok: distStatus.ok }"
+        :class="{ ok: distStatus.ok, warn: distStatus.warn }"
       >
-        <template v-if="ar.distanceCm.value !== null">
-          <span class="dist-num metric">{{ ar.distanceCm.value }}</span>
-          <span class="dist-unit">cm</span>
+        <template v-if="distDisplay">
+          <span class="dist-num metric">{{ distDisplay.value }}</span>
+          <span class="dist-unit">{{ distDisplay.unit }}</span>
         </template>
         <span v-if="distStatus.text" class="dist-status">{{ distStatus.text }}</span>
-        <span v-else-if="ar.distanceCm.value !== null" class="dist-status ok-text">ideal ✓</span>
       </div>
 
       <!-- Instruction -->
@@ -311,7 +338,7 @@ function moveReticle(e) {
         @pointerdown="onPointerDown"
         @pointermove="onPointerMove"
         @pointerup="onPointerUp"
-        @pointercancel="onPointerUp"
+        @pointercancel="onPointerCancel"
         @touchstart.passive="onPointerDown"
         @touchmove.prevent="onPointerMove"
         @touchend="onPointerUp"
@@ -445,7 +472,8 @@ function moveReticle(e) {
   pointer-events: none;
   white-space: nowrap;
 }
-.ar-dist-badge.ok { border-color: rgba(46, 196, 182, 0.6); }
+.ar-dist-badge.ok   { border-color: rgba(46, 196, 182, 0.6); }
+.ar-dist-badge.warn { border-color: rgba(251, 133, 0, 0.6); }
 
 .dist-num {
   font-size: 24px;
@@ -454,10 +482,10 @@ function moveReticle(e) {
   line-height: 1;
   transition: color 0.25s;
 }
-.ar-dist-badge.ok .dist-num { color: var(--accent-amber); }
+.ar-dist-badge.ok   .dist-num { color: var(--accent-amber); }
+.ar-dist-badge.warn .dist-num { color: #FB8500; }
 .dist-unit   { font-size: 13px; font-weight: 600; color: var(--text-300); margin-right: 4px; }
 .dist-status { font-size: 12px; color: #fca5a5; }
-.ok-text     { color: #2EC4B6; }
 
 /* ── Instruction ──────────────────────────────────────────────────────────── */
 .ar-instruction {
