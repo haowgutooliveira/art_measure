@@ -1,31 +1,39 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { useARCamera } from '../composables/useARCamera.js'
 
 const emit = defineEmits(['captured'])
 
 const ar = useARCamera()
 
-// ─── State ────────────────────────────────────────────────────────────────────
+// ─── States ───────────────────────────────────────────────────────────────────
 // 'checking' | 'ar-active' | 'capturing' | 'fb-ready' | 'error' | 'done'
 const camState   = ref('checking')
 const camError   = ref('')
 const isFlashing = ref(false)
 
 // ─── DOM refs ─────────────────────────────────────────────────────────────────
-const arOverlayRef = ref(null)
-const fbVideoRef   = ref(null)
-const hiddenCanvas = ref(null)
-let   fbStream     = null
+// FIX: overlay always rendered via showAROverlay flag so arOverlayRef is
+// populated BEFORE we call ar.start() — previously camState was 'checking'
+// when start() was called, so v-if kept the element out of the DOM and
+// dom-overlay received null, causing XR to take over without any UI.
+const showAROverlay = ref(false)
+const arOverlayRef  = ref(null)
+const fbVideoRef    = ref(null)
+const hiddenCanvas  = ref(null)
+let   fbStream      = null
 
-// ─── Fallback: fixed distance ─────────────────────────────────────────────────
-const FB_DISTANCE_CM = 25   // typical phone-to-skin distance for a reference shot
+// ─── Draggable reticle position ───────────────────────────────────────────────
+const reticleX = ref(0)   // set to center on mount
+const reticleY = ref(0)
+const isDragging = ref(false)
 
-/** pixelsPerCm using pinhole model at a fixed 25 cm */
+// ─── Fallback fixed distance ──────────────────────────────────────────────────
+const FB_DISTANCE_CM = 25
+
 function fbCalcPixelsPerCm(imageWidthPx) {
   const H_FOV_RAD = (65 * Math.PI) / 180
-  const focalPx   = imageWidthPx / (2 * Math.tan(H_FOV_RAD / 2))
-  return focalPx / FB_DISTANCE_CM
+  return (imageWidthPx / (2 * Math.tan(H_FOV_RAD / 2))) / FB_DISTANCE_CM
 }
 
 // ─── OS recovery hint ─────────────────────────────────────────────────────────
@@ -36,18 +44,32 @@ const recoveryInstructions = computed(() => {
   return 'Verifique as permissões de câmera nas configurações do navegador.'
 })
 
-// ─── Distance status (AR only) ────────────────────────────────────────────────
+// ─── Distance status (AR) ─────────────────────────────────────────────────────
 const distStatus = computed(() => {
-  if (camState.value !== 'ar-active') return { ok: true }
+  if (camState.value !== 'ar-active') return { ok: true, text: null }
   const d = ar.distanceCm.value
-  if (d === null) return { text: 'Apontando para a área…', ok: false }
-  if (d < 10)    return { text: 'Muito perto', ok: false }
-  if (d > 80)    return { text: 'Muito longe', ok: false }
-  return { text: null, ok: true }
+  if (d === null) return { ok: false, text: 'Apontando para a área…' }
+  if (d < 10)    return { ok: false, text: 'Muito perto' }
+  if (d > 80)    return { ok: false, text: 'Muito longe' }
+  return { ok: true, text: null }
+})
+
+// ─── Watch XR session end ─────────────────────────────────────────────────────
+// FIX: when the user presses Android back (or any other external XR end),
+// ar.isActive goes false while camState is still 'ar-active' → spinner forever.
+// Detect that and fall back to the regular camera.
+watch(() => ar.isActive.value, (active) => {
+  if (!active && camState.value === 'ar-active') {
+    showAROverlay.value = false
+    startFallback()
+  }
 })
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 onMounted(async () => {
+  reticleX.value = window.innerWidth  / 2
+  reticleY.value = window.innerHeight / 2
+
   await ar.checkSupport()
   if (ar.isSupported.value) {
     await startAR()
@@ -64,11 +86,17 @@ onUnmounted(() => {
 // ─── AR mode ──────────────────────────────────────────────────────────────────
 async function startAR() {
   camState.value = 'checking'
+
+  // FIX: render overlay first so arOverlayRef.value is not null
+  showAROverlay.value = true
+  await nextTick()   // let Vue mount the Teleported element
+
   try {
-    await nextTick()
     await ar.start(arOverlayRef.value)
     camState.value = 'ar-active'
   } catch {
+    // AR not available or dom-overlay not supported → plain camera fallback
+    showAROverlay.value = false
     await startFallback()
   }
 }
@@ -80,7 +108,8 @@ async function captureAR() {
   camState.value = 'capturing'
 
   try {
-    const { lockedDistanceCm, pixelsPerCm: tempPpc } = await ar.lockAndRelease(1920)
+    const { lockedDistanceCm } = await ar.lockAndRelease(1920)
+    showAROverlay.value = false
 
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
@@ -124,13 +153,11 @@ async function startFallback() {
     await fbVideoRef.value.play()
   } catch (err) {
     camState.value = 'error'
-    if (err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError') {
-      camError.value = 'Permissão de câmera negada.'
-    } else if (err.name === 'NotFoundError') {
-      camError.value = 'Nenhuma câmera encontrada neste dispositivo.'
-    } else {
-      camError.value = 'Não foi possível acessar a câmera.'
-    }
+    camError.value = err.name === 'NotAllowedError' || err.name === 'PermissionDeniedError'
+      ? 'Permissão de câmera negada.'
+      : err.name === 'NotFoundError'
+        ? 'Nenhuma câmera encontrada neste dispositivo.'
+        : 'Não foi possível acessar a câmera.'
   }
 }
 
@@ -163,46 +190,91 @@ function retryCamera() {
   if (ar.isSupported.value) startAR()
   else startFallback()
 }
+
+// ─── Draggable reticle ────────────────────────────────────────────────────────
+function onPointerDown(e) {
+  isDragging.value = true
+  moveReticle(e)
+}
+function onPointerMove(e) {
+  if (!isDragging.value) return
+  e.preventDefault()
+  moveReticle(e)
+}
+function onPointerUp() {
+  isDragging.value = false
+}
+function moveReticle(e) {
+  const src = e.touches ? e.touches[0] : e
+  reticleX.value = src.clientX
+  reticleY.value = src.clientY
+}
 </script>
 
 <template>
-  <!-- ── AR overlay ─────────────────────────────────────────────────────────── -->
+  <!-- ── AR overlay — always rendered when showAROverlay so ref is set before start() ── -->
   <Teleport to="body">
     <div
-      v-if="camState === 'ar-active' || camState === 'capturing'"
+      v-if="showAROverlay"
       ref="arOverlayRef"
       class="ar-overlay"
+      @pointerdown="onPointerDown"
+      @pointermove="onPointerMove"
+      @pointerup="onPointerUp"
+      @pointercancel="onPointerUp"
+      @touchstart.passive="onPointerDown"
+      @touchmove.prevent="onPointerMove"
+      @touchend="onPointerUp"
     >
       <div class="capture-flash" :class="{ flashing: isFlashing }" />
 
-      <!-- Distance badge (top center) -->
-      <div v-if="ar.distanceCm.value !== null" class="ar-dist-badge" :class="{ ok: distStatus.ok }">
-        <span class="dist-num metric">{{ ar.distanceCm.value }}</span>
-        <span class="dist-unit">cm</span>
-        <span v-if="distStatus.text" class="dist-status">— {{ distStatus.text }}</span>
+      <!-- Distance badge -->
+      <div
+        v-if="camState === 'ar-active'"
+        class="ar-dist-badge"
+        :class="{ ok: distStatus.ok }"
+      >
+        <template v-if="ar.distanceCm.value !== null">
+          <span class="dist-num metric">{{ ar.distanceCm.value }}</span>
+          <span class="dist-unit">cm</span>
+        </template>
+        <span v-if="distStatus.text" class="dist-status">{{ distStatus.text }}</span>
+        <span v-else-if="ar.distanceCm.value !== null" class="dist-status ok-text">ideal ✓</span>
       </div>
 
       <!-- Instruction -->
-      <div class="ar-instruction">
-        Aponte o ponto para a área a ser tatuada
+      <div v-if="camState === 'ar-active'" class="ar-instruction">
+        Arraste o alvo para a área a ser tatuada
       </div>
 
-      <!-- Reticle — centred on screen -->
-      <div class="ar-reticle" :class="{ hit: ar.hasHit.value }">
+      <!-- Draggable reticle -->
+      <div
+        v-if="camState === 'ar-active'"
+        class="ar-reticle"
+        :class="{ hit: ar.hasHit.value }"
+        :style="{ left: reticleX + 'px', top: reticleY + 'px' }"
+      >
         <span class="reticle-h" /><span class="reticle-v" />
         <span class="reticle-ring" />
+        <span class="reticle-drag-hint">✥</span>
       </div>
 
       <!-- Shutter -->
-      <div class="ar-controls">
+      <div v-if="camState === 'ar-active'" class="ar-controls">
         <button
           class="shutter-btn"
-          :disabled="!distStatus.ok || camState === 'capturing'"
+          :disabled="!distStatus.ok"
           aria-label="Capturar foto"
-          @click="captureAR"
+          @click.stop="captureAR"
         >
           <span class="shutter-inner" aria-hidden="true" />
         </button>
+      </div>
+
+      <!-- Capturing spinner inside overlay -->
+      <div v-if="camState === 'capturing'" class="ar-capturing">
+        <div class="spinner" />
+        <p>Capturando…</p>
       </div>
     </div>
   </Teleport>
@@ -210,12 +282,14 @@ function retryCamera() {
   <!-- ── Component shell ────────────────────────────────────────────────────── -->
   <div class="cam-wrap">
 
-    <!-- Loading / capturing -->
-    <div v-if="camState === 'checking' || camState === 'capturing' || camState === 'ar-active'" class="cam-state">
+    <!-- Loading -->
+    <div v-if="camState === 'checking' || camState === 'capturing'" class="cam-state">
       <div class="spinner" />
-      <p v-if="camState === 'checking'">Iniciando câmera…</p>
-      <p v-else-if="camState === 'capturing'">Capturando…</p>
+      <p>{{ camState === 'capturing' ? 'Capturando…' : 'Iniciando câmera…' }}</p>
     </div>
+
+    <!-- AR active: XR handles display, shell shows nothing -->
+    <div v-else-if="camState === 'ar-active'" class="cam-state" />
 
     <!-- Error -->
     <div v-else-if="camState === 'error'" class="cam-state cam-error">
@@ -225,21 +299,34 @@ function retryCamera() {
       <button class="btn btn-amber" @click="retryCamera">Tentar Novamente</button>
     </div>
 
-    <!-- Fallback: plain camera + reticle, no slider -->
+    <!-- Fallback: plain camera + fixed reticle -->
     <template v-else-if="camState === 'fb-ready'">
       <video ref="fbVideoRef" class="cam-video" autoplay muted playsinline />
 
       <div class="capture-flash" :class="{ flashing: isFlashing }" />
 
-      <!-- Same reticle as AR mode, but no distance badge -->
-      <div class="cam-overlay">
+      <!-- Overlay: draggable reticle -->
+      <div
+        class="cam-overlay"
+        @pointerdown="onPointerDown"
+        @pointermove="onPointerMove"
+        @pointerup="onPointerUp"
+        @pointercancel="onPointerUp"
+        @touchstart.passive="onPointerDown"
+        @touchmove.prevent="onPointerMove"
+        @touchend="onPointerUp"
+      >
         <div class="ar-instruction fb-instruction">
-          Aponte o ponto para a área a ser tatuada e capture
+          Arraste o alvo para a área a ser tatuada
         </div>
 
-        <div class="ar-reticle hit">
+        <div
+          class="ar-reticle hit"
+          :style="{ left: reticleX + 'px', top: reticleY + 'px' }"
+        >
           <span class="reticle-h" /><span class="reticle-v" />
           <span class="reticle-ring" />
+          <span class="reticle-drag-hint">✥</span>
         </div>
       </div>
 
@@ -323,14 +410,22 @@ function retryCamera() {
   position: fixed;
   inset: 0;
   z-index: 1000;
+  /* touch-action: none allows preventDefault on touchmove (drag) */
+  touch-action: none;
+}
+
+/* ── Capturing inside overlay ─────────────────────────────────────────────── */
+.ar-capturing {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 16px;
+  color: var(--text-300);
   pointer-events: none;
 }
-.ar-overlay .ar-controls,
-.ar-overlay .shutter-btn { pointer-events: auto; }
 
 /* ── Distance badge ───────────────────────────────────────────────────────── */
 .ar-dist-badge {
@@ -360,9 +455,9 @@ function retryCamera() {
   transition: color 0.25s;
 }
 .ar-dist-badge.ok .dist-num { color: var(--accent-amber); }
-.dist-unit   { font-size: 13px; font-weight: 600; color: var(--text-300); }
-.dist-status { font-size: 12px; color: #fca5a5; transition: color 0.25s; }
-.ar-dist-badge.ok .dist-status { color: #2EC4B6; }
+.dist-unit   { font-size: 13px; font-weight: 600; color: var(--text-300); margin-right: 4px; }
+.dist-status { font-size: 12px; color: #fca5a5; }
+.ok-text     { color: #2EC4B6; }
 
 /* ── Instruction ──────────────────────────────────────────────────────────── */
 .ar-instruction {
@@ -382,17 +477,18 @@ function retryCamera() {
   pointer-events: none;
 }
 
-/* ── Reticle ──────────────────────────────────────────────────────────────── */
+/* ── Reticle — draggable, positioned absolutely ───────────────────────────── */
 .ar-reticle {
-  position: relative;
+  position: fixed;
+  transform: translate(-50%, -50%);
   width: 64px;
   height: 64px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: transform 0.15s;
+  /* pointer-events: none so drag events go to the overlay, not the reticle */
+  pointer-events: none;
 }
-.ar-reticle.hit { transform: scale(1.1); }
 
 .reticle-ring {
   position: absolute;
@@ -413,6 +509,17 @@ function retryCamera() {
 .ar-reticle.hit .reticle-h,
 .ar-reticle.hit .reticle-v { background: #FFB703; }
 
+/* Drag handle indicator — small arrows icon below the crosshair */
+.reticle-drag-hint {
+  position: absolute;
+  bottom: -20px;
+  font-size: 14px;
+  color: rgba(255, 183, 3, 0.7);
+  line-height: 1;
+  pointer-events: none;
+  user-select: none;
+}
+
 /* ── AR shutter bar ───────────────────────────────────────────────────────── */
 .ar-controls {
   position: fixed;
@@ -423,23 +530,17 @@ function retryCamera() {
   display: flex;
   justify-content: center;
   background: linear-gradient(transparent, rgba(2, 30, 45, 0.88) 40%);
+  pointer-events: auto;
 }
 
 /* ── Fallback overlay ─────────────────────────────────────────────────────── */
 .cam-overlay {
   position: absolute;
   inset: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
+  touch-action: none;
 }
 .fb-instruction {
-  position: absolute;
   bottom: calc(130px + env(safe-area-inset-bottom, 0px));
-  left: 16px;
-  right: 16px;
 }
 
 /* ── Fallback shutter bar ─────────────────────────────────────────────────── */

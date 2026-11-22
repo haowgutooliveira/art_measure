@@ -44,11 +44,13 @@ export function useARCamera() {
     errorMsg.value = null
     _lockedDistance = null
 
-    const opts = {
-      requiredFeatures: ['hit-test'],
-      optionalFeatures: overlayElement ? ['dom-overlay'] : [],
-      ...(overlayElement && { domOverlay: { root: overlayElement } }),
-    }
+    // dom-overlay is required (not optional): without it XR takes over the
+    // screen completely and no DOM buttons are visible. If a device supports
+    // immersive-ar but not dom-overlay, the session request throws and we fall
+    // back gracefully to the regular camera.
+    const opts = overlayElement
+      ? { requiredFeatures: ['hit-test', 'dom-overlay'], domOverlay: { root: overlayElement } }
+      : { requiredFeatures: ['hit-test'] }
 
     _session = await navigator.xr.requestSession('immersive-ar', opts)
 
