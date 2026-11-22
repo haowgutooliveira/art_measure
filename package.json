@@ -1,0 +1,22 @@
+{
+  "name": "tattmeasure",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "node scripts/create-icons.mjs && vite build",
+    "preview": "vite preview",
+    "generate-icons": "node scripts/create-icons.mjs",
+    "postinstall": "node scripts/create-icons.mjs"
+  },
+  "dependencies": {
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-basic-ssl": "^2.3.0",
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.2.0",
+    "vite-plugin-pwa": "^0.19.8"
+  }
+}
