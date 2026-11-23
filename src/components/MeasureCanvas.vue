@@ -17,15 +17,23 @@ const dispH   = ref(400)
 const displayPpc = ref(1)
 
 function updateDisplayPpc() {
-  const img = imgRef.value
-  if (!img || !img.clientWidth) return
-  dispW.value = img.clientWidth
-  dispH.value = img.clientHeight
-  displayPpc.value = computeEffectivePpc(
-    props.pixelsPerCm,
-    img.naturalWidth,
-    img.clientWidth,
-  )
+  if (mode.value === 'ruler') {
+    const img = imgRef.value
+    if (!img || !img.clientWidth || !img.naturalWidth) return
+    dispW.value = img.clientWidth
+    dispH.value = img.clientHeight
+    displayPpc.value = computeEffectivePpc(props.pixelsPerCm, img.naturalWidth, img.clientWidth)
+  } else {
+    // Freehand: canvas uses cover-fit (Math.max scale) — match redraw() scaling
+    const canvas = canvasRef.value
+    const img    = imgRef.value          // hidden img — naturalWidth is correct regardless of CSS size
+    if (!canvas || !img || !img.naturalWidth) return
+    const W = canvas.clientWidth || 0
+    const H = canvas.clientHeight || 0
+    if (!W || !H) return
+    const scale = Math.max(W / img.naturalWidth, H / img.naturalHeight)
+    displayPpc.value = props.pixelsPerCm * scale
+  }
 }
 
 onMounted(async () => {
@@ -38,6 +46,9 @@ watch(() => props.pixelsPerCm, updateDisplayPpc)
 
 // ─── Mode ─────────────────────────────────────────────────────────────────
 const mode = ref('freehand')   // 'ruler' | 'freehand'
+
+// Re-compute ppc whenever mode changes (ruler uses imgRef.clientWidth, freehand uses canvas)
+watch(mode, async () => { await nextTick(); updateDisplayPpc() })
 
 function setMode(m) {
   if (mode.value === m) return
@@ -103,6 +114,7 @@ function resizeCanvas() {
   const dpr = window.devicePixelRatio || 1
   canvas.width  = rect.width  * dpr
   canvas.height = rect.height * dpr
+  updateDisplayPpc()   // canvas dimensions just changed — recompute scale
   redraw()
 }
 
@@ -165,6 +177,73 @@ function redraw() {
     ctx.setLineDash([6, 4])
     ctx.stroke()
     ctx.setLineDash([])
+
+    // ── Live measurement annotations ──────────────────────────────────────
+    const ppc = displayPpc.value
+    if (ppc > 0) {
+      const xs   = pts.map(p => p.x), ys = pts.map(p => p.y)
+      const minX = Math.min(...xs), maxX = Math.max(...xs)
+      const minY = Math.min(...ys), maxY = Math.max(...ys)
+      const wCm  = ((maxX - minX) / ppc).toFixed(1)
+      const hCm  = ((maxY - minY) / ppc).toFixed(1)
+      let sum = 0
+      pts.forEach((p, i) => { const j = (i + 1) % pts.length; sum += p.x * pts[j].y - pts[j].x * p.y })
+      const aCm = (Math.abs(sum) / 2 / (ppc * ppc)).toFixed(1)
+
+      const PAD = 24, TIP = 5
+      const wyLine = Math.max(PAD, minY - PAD)
+      const hxLine = Math.min(W - PAD, maxX + PAD)
+
+      // Extension lines
+      ctx.strokeStyle = 'rgba(255,255,255,0.45)'
+      ctx.lineWidth   = 0.8
+      ctx.setLineDash([3, 4])
+      ctx.beginPath()
+      ctx.moveTo(minX, minY); ctx.lineTo(minX, wyLine)
+      ctx.moveTo(maxX, minY); ctx.lineTo(maxX, wyLine)
+      ctx.moveTo(maxX, minY); ctx.lineTo(hxLine, minY)
+      ctx.moveTo(maxX, maxY); ctx.lineTo(hxLine, maxY)
+      ctx.stroke()
+      ctx.setLineDash([])
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)'
+      ctx.lineWidth   = 1.5
+
+      // Width arrow (horizontal)
+      ctx.beginPath()
+      ctx.moveTo(minX, wyLine); ctx.lineTo(maxX, wyLine)
+      ctx.moveTo(minX, wyLine); ctx.lineTo(minX + TIP, wyLine - TIP * 0.6)
+      ctx.moveTo(minX, wyLine); ctx.lineTo(minX + TIP, wyLine + TIP * 0.6)
+      ctx.moveTo(maxX, wyLine); ctx.lineTo(maxX - TIP, wyLine - TIP * 0.6)
+      ctx.moveTo(maxX, wyLine); ctx.lineTo(maxX - TIP, wyLine + TIP * 0.6)
+      ctx.stroke()
+
+      // Height arrow (vertical)
+      ctx.beginPath()
+      ctx.moveTo(hxLine, minY); ctx.lineTo(hxLine, maxY)
+      ctx.moveTo(hxLine, minY); ctx.lineTo(hxLine - TIP * 0.6, minY + TIP)
+      ctx.moveTo(hxLine, minY); ctx.lineTo(hxLine + TIP * 0.6, minY + TIP)
+      ctx.moveTo(hxLine, maxY); ctx.lineTo(hxLine - TIP * 0.6, maxY - TIP)
+      ctx.moveTo(hxLine, maxY); ctx.lineTo(hxLine + TIP * 0.6, maxY - TIP)
+      ctx.stroke()
+
+      // Badge helper
+      function liveBadge(text, x, y, big = false) {
+        const fs = big ? 15 : 12
+        ctx.font = `bold ${fs}px system-ui, sans-serif`
+        ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+        const tw = ctx.measureText(text).width
+        const bw = tw + fs * 1.4, bh = fs * 1.9, br = bh * 0.35
+        ctx.fillStyle = big ? 'rgba(15,23,42,0.90)' : 'rgba(15,23,42,0.84)'
+        ctx.beginPath(); ctx.roundRect(x - bw / 2, y - bh / 2, bw, bh, br); ctx.fill()
+        ctx.fillStyle = big ? '#fff' : '#f59e0b'
+        ctx.fillText(text, x, y)
+      }
+
+      liveBadge(`${wCm} cm`,  (minX + maxX) / 2, wyLine)
+      liveBadge(`${hCm} cm`,  hxLine + 28,        (minY + maxY) / 2)
+      liveBadge(`${aCm} cm²`, (minX + maxX) / 2,  (minY + maxY) / 2, true)
+    }
   }
 
   // Start-point dot (green)
@@ -485,8 +564,12 @@ onMounted(async () => {
 })
 watch(() => props.imageDataUrl, src => { bgImage.src = src })
 
-// Redraw when strokes change
-watch([strokes, isClosed], () => { if (mode.value === 'freehand') redraw() }, { deep: true })
+// Redraw when strokes change; recompute ppc on close (needs displayPpc for annotations)
+watch([strokes, isClosed], () => {
+  if (mode.value !== 'freehand') return
+  if (isClosed.value) updateDisplayPpc()
+  redraw()
+}, { deep: true })
 
 // ─── Hint ─────────────────────────────────────────────────────────────────
 const hintText = computed(() => {
