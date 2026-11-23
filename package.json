@@ -8,14 +8,21 @@
     "build": "node scripts/create-icons.mjs && vite build",
     "preview": "vite preview",
     "generate-icons": "node scripts/create-icons.mjs",
-    "postinstall": "node scripts/create-icons.mjs"
+    "postinstall": "node scripts/create-icons.mjs",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:unit:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "vue": "^3.4.21"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^5.0.4",
+    "@vitest/coverage-v8": "^2.1.9",
+    "@vue/test-utils": "^2.6.0",
+    "jsdom": "^29.1.1",
     "vite": "^5.2.0",
-    "vite-plugin-pwa": "^0.19.8"
+    "vite-plugin-pwa": "^0.19.8",
+    "vitest": "^2.1.9"
   }
 }

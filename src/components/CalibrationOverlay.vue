@@ -1,5 +1,6 @@
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { computePixelsPerCm } from '../composables/useScaleCalibration.js'
 
 const props = defineProps({ imageDataUrl: { type: String, required: true } })
 const emit  = defineEmits(['confirm'])
@@ -45,12 +46,15 @@ function reset() {
 }
 
 function confirm() {
-  const img    = imgRef.value
-  const scale  = img.naturalWidth / img.clientWidth
-  const dx     = (p2.value.x - p1.value.x) * scale
-  const dy     = (p2.value.y - p1.value.y) * scale
-  const pxDist = Math.sqrt(dx * dx + dy * dy)
-  emit('confirm', pxDist / realCm.value)
+  const img = imgRef.value
+  const ppc = computePixelsPerCm({
+    p1: p1.value,
+    p2: p2.value,
+    displayWidth: img.clientWidth,
+    naturalWidth: img.naturalWidth,
+    realCm: realCm.value,
+  })
+  emit('confirm', ppc)
 }
 </script>
 
