@@ -2,18 +2,19 @@
 import { ref } from 'vue'
 import CameraCapture       from './components/CameraCapture.vue'
 import CalibrationOverlay  from './components/CalibrationOverlay.vue'
-import TattooCanvas        from './components/TattooCanvas.vue'
+import MeasureCanvas       from './components/MeasureCanvas.vue'
 import { useShoelaceArea } from './composables/useShoelaceArea.js'
 
 // ─── Global state ─────────────────────────────────────────────────────────
-const step              = ref(0)   // 0=intro  1=camera  2=draw  3=summary
-const showRestartModal  = ref(false)  // UX #5
-const showTechDetails   = ref(false)  // UX #4
+const step              = ref(0)   // 0=intro  1=camera  2=calibration  3=measure  4=summary
+const showRestartModal  = ref(false)
+const showTechDetails   = ref(false)
 const imageDataUrl  = ref(null)
 const snapshotUrl   = ref(null)
 const pixelsPerCm   = ref(1)
-const capturedDist  = ref(30)
 const polygonPoints = ref([])
+const measureMode   = ref('polygon')   // 'ruler' | 'polygon'
+const rulerDistCm   = ref(null)        // used when mode=ruler
 
 // ─── Summary form ─────────────────────────────────────────────────────────
 const clientName    = ref('')
@@ -34,8 +35,10 @@ function onCalibrated(ppc) {
   step.value = 3   // go to drawing
 }
 
-function onDrawingComplete({ points, snapshotUrl: snap }) {
-  polygonPoints.value = points
+function onDrawingComplete({ mode, points, distanceCm, snapshotUrl: snap }) {
+  measureMode.value   = mode
+  polygonPoints.value = points ?? []
+  rulerDistCm.value   = distanceCm ?? null
   snapshotUrl.value   = snap
   step.value = 4
 }
@@ -63,6 +66,8 @@ function restart() {
   observations.value  = ''
   tattooPhone.value   = ''
   pixelsPerCm.value   = 1
+  measureMode.value   = 'polygon'
+  rulerDistCm.value   = null
   showTechDetails.value = false
 }
 
@@ -71,7 +76,7 @@ function goBack() {
   if (step.value > 0)   { step.value-- }
 }
 
-const STEPS = ['Câmera', 'Escala', 'Desenho', 'Resultado']
+const STEPS = ['Câmera', 'Escala', 'Medir', 'Resultado']
 </script>
 
 <template>
@@ -171,8 +176,8 @@ const STEPS = ['Câmera', 'Escala', 'Desenho', 'Resultado']
         <div class="how-item">
           <div class="how-num">3</div>
           <div>
-            <strong>Desenho</strong>
-            <p>Risque o contorno da área da arte. Uma lupa aparece acima do dedo para precisão.</p>
+            <strong>Medir</strong>
+            <p>Toque nos pontos do contorno da arte. Use o modo <strong>📏 Fita</strong> para uma distância ou <strong>📐 Área</strong> para o polígono completo.</p>
           </div>
         </div>
         <div class="how-item">
@@ -202,8 +207,8 @@ const STEPS = ['Câmera', 'Escala', 'Desenho', 'Resultado']
       @confirm="onCalibrated"
     />
 
-    <!-- ── Step 3 — Drawing ────────────────────────────────────────────── -->
-    <TattooCanvas
+    <!-- ── Step 3 — Measure ──────────────────────────────────────────── -->
+    <MeasureCanvas
       v-if="step === 3 && imageDataUrl"
       :imageDataUrl="imageDataUrl"
       :pixelsPerCm="pixelsPerCm"
@@ -226,7 +231,16 @@ const STEPS = ['Câmera', 'Escala', 'Desenho', 'Resultado']
 
       <!-- Measurement card -->
       <div class="measure-card">
-        <div class="measure-row">
+        <!-- Ruler mode: single distance -->
+        <div v-if="measureMode === 'ruler'" class="measure-row">
+          <div class="measure-block">
+            <span class="measure-num">{{ rulerDistCm?.toFixed(1) ?? '—' }}</span>
+            <span class="measure-unit">cm</span>
+            <span class="measure-desc">Distância</span>
+          </div>
+        </div>
+        <!-- Polygon mode: area + bounding box -->
+        <div v-else class="measure-row">
           <div class="measure-block">
             <span class="measure-num">{{ areaCm2.toFixed(1) }}</span>
             <span class="measure-unit">cm²</span>
