@@ -42,6 +42,25 @@ export function computeSegmentDistances(points, ppc, closed = false) {
 }
 
 /**
+ * Convert ppc from image-pixel space to display-pixel space.
+ *
+ * CalibrationOverlay returns ppc in image-px/cm. MeasureCanvas stores
+ * touch coordinates in CSS display-px. Use this to get a ppc that works
+ * directly with display-px point coordinates.
+ *
+ *   effectivePpc = ppc_image × (clientWidth / naturalWidth)
+ *
+ * @param {number} pixelsPerCm   ppc in image-px/cm (from calibration)
+ * @param {number} naturalWidth  full image width in px
+ * @param {number} clientWidth   rendered image width in CSS px
+ * @returns {number} ppc in display-px/cm (0 on degenerate input)
+ */
+export function computeEffectivePpc(pixelsPerCm, naturalWidth, clientWidth) {
+  if (!pixelsPerCm || !naturalWidth || !clientWidth) return 0
+  return pixelsPerCm * (clientWidth / naturalWidth)
+}
+
+/**
  * Centroid (average position) of a set of vertices.
  * Good enough for label positioning; not the true polygon area centroid.
  *
