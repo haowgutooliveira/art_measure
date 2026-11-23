@@ -1,6 +1,6 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick } from 'vue'
-import { computeDistanceCm, computeSegmentDistances, polygonCentroid } from '../composables/useMeasurement.js'
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { computeDistanceCm, computeEffectivePpc, polygonCentroid } from '../composables/useMeasurement.js'
 import { useShoelaceArea } from '../composables/useShoelaceArea.js'
 
 const props = defineProps({
@@ -9,30 +9,35 @@ const props = defineProps({
 })
 const emit = defineEmits(['complete'])
 
-// ─── Image refs & display size ────────────────────────────────────────────
+// ─── Image ────────────────────────────────────────────────────────────────
 const imgRef  = ref(null)
 const dispW   = ref(300)
 const dispH   = ref(400)
-// Scale from display-px → image-px (for distance calc)
-const imgScale = ref(1)
+// ppc in display-px/cm, recomputed whenever img dimensions change
+const displayPpc = ref(1)
 
-function updateDispSize() {
+function updateDisplayPpc() {
   const img = imgRef.value
-  if (!img) return
-  dispW.value  = img.clientWidth
-  dispH.value  = img.clientHeight
-  imgScale.value = img.naturalWidth ? img.naturalWidth / img.clientWidth : 1
+  if (!img || !img.clientWidth) return
+  dispW.value = img.clientWidth
+  dispH.value = img.clientHeight
+  displayPpc.value = computeEffectivePpc(
+    props.pixelsPerCm,
+    img.naturalWidth,
+    img.clientWidth,
+  )
 }
-onMounted(async () => { await nextTick(); updateDispSize(); window.addEventListener('resize', updateDispSize) })
-onUnmounted(() => window.removeEventListener('resize', updateDispSize))
 
-// ─── Effective ppc in display-pixel space ─────────────────────────────────
-// ppc prop is in image-px/cm → convert to display-px/cm so all our
-// point coords (stored in display-px) feed directly into distance functions.
-const effectivePpc = computed(() => props.pixelsPerCm / imgScale.value)
+onMounted(async () => {
+  await nextTick()
+  updateDisplayPpc()
+  window.addEventListener('resize', updateDisplayPpc)
+})
+onUnmounted(() => window.removeEventListener('resize', updateDisplayPpc))
+watch(() => props.pixelsPerCm, updateDisplayPpc)
 
 // ─── Mode ─────────────────────────────────────────────────────────────────
-const mode = ref('polygon') // 'ruler' | 'polygon'
+const mode = ref('freehand')   // 'ruler' | 'freehand'
 
 function setMode(m) {
   if (mode.value === m) return
@@ -40,296 +45,413 @@ function setMode(m) {
   clearAll()
 }
 
-// ─── Points (display-px coords) ───────────────────────────────────────────
-const points = ref([])   // [{ x, y }] in CSS display pixels
-const isClosed = ref(false)
+// ══════════════════════════════════════════════════════════════════════════
+// RULER MODE — tap A, drag B, live badge
+// ══════════════════════════════════════════════════════════════════════════
 
-// ruler: max 2 points; polygon: unlimited, closed on confirm
-const maxPoints = computed(() => mode.value === 'ruler' ? 2 : Infinity)
-const canClose  = computed(() => mode.value === 'polygon' && points.value.length >= 3)
-const canConfirm = computed(() =>
-  mode.value === 'ruler'
-    ? points.value.length === 2
-    : points.value.length >= 3
-)
+const rulerA    = ref(null)   // { x, y } fixed
+const rulerB    = ref(null)   // { x, y } fixed (after touchend)
+const rulerLive = ref(null)   // { x, y } live while dragging (before touchend)
 
-// ─── Computed segments & area ─────────────────────────────────────────────
-const segments = computed(() => {
-  const pts = points.value
-  const ppc = effectivePpc.value
-  if (pts.length < 2) return []
-  const dists = computeSegmentDistances(pts, ppc, isClosed.value)
-  return dists.map((dist, i) => {
-    const p1 = pts[i]
-    const p2 = i < pts.length - 1 ? pts[i + 1] : pts[0]  // closing segment
-    return {
-      p1, p2,
-      mid: { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 },
-      dist,
-    }
-  })
-})
+// The "active" B for display: live position while dragging, final otherwise
+const rulerBActive = computed(() => rulerLive.value ?? rulerB.value)
 
 const rulerDist = computed(() => {
-  if (mode.value !== 'ruler' || points.value.length < 2) return null
-  return computeDistanceCm(points.value[0], points.value[1], effectivePpc.value)
+  if (!rulerA.value || !rulerBActive.value || displayPpc.value <= 0) return null
+  return computeDistanceCm(rulerA.value, rulerBActive.value, displayPpc.value)
 })
 
-const centroid = computed(() => polygonCentroid(points.value))
+const rulerMid = computed(() => {
+  if (!rulerA.value || !rulerBActive.value) return null
+  return {
+    x: (rulerA.value.x + rulerBActive.value.x) / 2,
+    y: (rulerA.value.y + rulerBActive.value.y) / 2,
+  }
+})
 
-// Use shoelace composable for area (in display-px, with effectivePpc)
-const { areaCm2 } = useShoelaceArea(points, effectivePpc)
+const rulerCanConfirm = computed(() => rulerA.value && rulerB.value)
 
-// SVG polygon points string
-const svgPolygonPoints = computed(() =>
-  points.value.map(p => `${p.x},${p.y}`).join(' ')
-)
+// ══════════════════════════════════════════════════════════════════════════
+// FREEHAND MODE — strokes + quadratic curves + magnifier
+// ══════════════════════════════════════════════════════════════════════════
 
-// ─── Magnifier state ──────────────────────────────────────────────────────
-const magRef    = ref(null)
-const magActive = ref(false)
-const magX      = ref(0)   // display-px: position of the circle on screen
-const magY      = ref(0)
+const canvasRef = ref(null)
+const wrapRef   = ref(null)
+const strokes   = ref([])      // array of Point[] arrays
+const isClosed  = ref(false)
+const isDrawing = ref(false)
+
+// Magnifier state
+const mag = ref({ visible: false, x: 0, y: 0 })
 const MAG_SIZE   = 110
 const MAG_OFFSET = 130
+const MAG_SCALE  = 2.2
 
-function drawMagnifier(displayX, displayY) {
-  const img = imgRef.value
-  const canvas = magRef.value
-  if (!img || !canvas) return
+// All points flattened across strokes
+const allPoints = computed(() => strokes.value.flat())
 
-  const zoom       = 2.5
-  const sourceSize = MAG_SIZE / zoom          // display-px region to sample
-  const sc         = imgScale.value
+// Area calculation via shoelace (using displayPpc for display-px point space)
+const { areaCm2, boundingBox } = useShoelaceArea(allPoints, displayPpc)
 
-  const ctx = canvas.getContext('2d')
-  ctx.clearRect(0, 0, MAG_SIZE, MAG_SIZE)
-
-  // Draw cropped & zoomed section of the base image
-  ctx.drawImage(
-    img,
-    (displayX - sourceSize / 2) * sc,   // src x in image-px
-    (displayY - sourceSize / 2) * sc,   // src y in image-px
-    sourceSize * sc,                     // src width in image-px
-    sourceSize * sc,                     // src height in image-px
-    0, 0, MAG_SIZE, MAG_SIZE,
-  )
-
-  // Crosshair
-  const half = MAG_SIZE / 2
-  ctx.strokeStyle = 'rgba(239,68,68,0.9)'
-  ctx.lineWidth   = 1.5
-  ctx.beginPath()
-  ctx.moveTo(half - 14, half); ctx.lineTo(half + 14, half)
-  ctx.moveTo(half, half - 14); ctx.lineTo(half, half + 14)
-  ctx.stroke()
-
-  // Ring border
-  ctx.strokeStyle = '#FFB703'
-  ctx.lineWidth   = 2.5
-  ctx.beginPath()
-  ctx.arc(half, half, half - 1.5, 0, Math.PI * 2)
-  ctx.stroke()
+// ─── Canvas setup ─────────────────────────────────────────────────────────
+function resizeCanvas() {
+  const wrap = wrapRef.value
+  if (!wrap) return
+  const rect = wrap.getBoundingClientRect()
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const dpr = window.devicePixelRatio || 1
+  canvas.width  = rect.width  * dpr
+  canvas.height = rect.height * dpr
+  redraw()
 }
 
-// ─── Touch / mouse handlers ───────────────────────────────────────────────
-let touchActive = false
-let currentTouch = { x: 0, y: 0 }
+function redraw() {
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const ctx = canvas.getContext('2d')
+  const dpr = window.devicePixelRatio || 1
+  const W = canvas.clientWidth
+  const H = canvas.clientHeight
 
-function getDisplayXY(e) {
-  const rect = imgRef.value.getBoundingClientRect()
-  const src  = e.changedTouches ? e.changedTouches[0] : e
+  ctx.save()
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+  ctx.clearRect(0, 0, W, H)
+
+  // Background image
+  const img = imgRef.value
+  if (img && img.complete && img.naturalWidth) {
+    const scale = Math.max(W / img.naturalWidth, H / img.naturalHeight)
+    const iw = img.naturalWidth  * scale
+    const ih = img.naturalHeight * scale
+    const ix = (W - iw) / 2
+    const iy = (H - ih) / 2
+    ctx.drawImage(img, ix, iy, iw, ih)
+  }
+
+  // Draw strokes
+  strokes.value.forEach(pts => {
+    if (pts.length < 2) return
+    ctx.beginPath()
+    ctx.moveTo(pts[0].x, pts[0].y)
+    for (let i = 1; i < pts.length - 1; i++) {
+      const mx = (pts[i].x + pts[i + 1].x) / 2
+      const my = (pts[i].y + pts[i + 1].y) / 2
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my)
+    }
+    ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y)
+    ctx.strokeStyle = '#ef4444'
+    ctx.lineWidth   = 2.5
+    ctx.lineJoin    = 'round'
+    ctx.lineCap     = 'round'
+    ctx.stroke()
+  })
+
+  // Closed fill + closing edge
+  if (isClosed.value && allPoints.value.length >= 3) {
+    const pts = allPoints.value
+    ctx.beginPath()
+    ctx.moveTo(pts[0].x, pts[0].y)
+    pts.forEach(p => ctx.lineTo(p.x, p.y))
+    ctx.closePath()
+    ctx.fillStyle = 'rgba(239,68,68,0.22)'
+    ctx.fill()
+    const last = pts[pts.length - 1]
+    ctx.beginPath()
+    ctx.moveTo(last.x, last.y)
+    ctx.lineTo(pts[0].x, pts[0].y)
+    ctx.strokeStyle = '#ef4444'
+    ctx.lineWidth   = 2.5
+    ctx.setLineDash([6, 4])
+    ctx.stroke()
+    ctx.setLineDash([])
+  }
+
+  // Start-point dot (green)
+  if (allPoints.value.length > 0 && !isClosed.value) {
+    const p = allPoints.value[0]
+    ctx.beginPath()
+    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2)
+    ctx.fillStyle   = '#22c55e'
+    ctx.fill()
+    ctx.strokeStyle = '#fff'
+    ctx.lineWidth   = 1.5
+    ctx.stroke()
+  }
+
+  ctx.restore()
+}
+
+function drawMagnifier(touchX, touchY) {
+  if (!mag.value.visible) return
+  const canvas = canvasRef.value
+  if (!canvas) return
+  const ctx  = canvas.getContext('2d')
+  const dpr  = window.devicePixelRatio || 1
+  const half = MAG_SIZE / 2
+  const capture = MAG_SIZE / MAG_SCALE
+  const mx = touchX - half
+  const my = touchY - MAG_OFFSET - half
+
+  ctx.save()
+  ctx.scale(dpr, dpr)
+  ctx.beginPath()
+  ctx.arc(mx + half, my + half, half, 0, Math.PI * 2)
+  ctx.clip()
+  ctx.drawImage(
+    canvas,
+    (touchX - capture / 2) * dpr, (touchY - capture / 2) * dpr,
+    capture * dpr, capture * dpr,
+    mx, my, MAG_SIZE, MAG_SIZE,
+  )
+  ctx.beginPath()
+  ctx.arc(mx + half, my + half, half, 0, Math.PI * 2)
+  ctx.strokeStyle = '#f59e0b'
+  ctx.lineWidth   = 2.5
+  ctx.stroke()
+  ctx.strokeStyle = 'rgba(239,68,68,0.9)'
+  ctx.lineWidth   = 1.2
+  const cx = mx + half, cy = my + half
+  ctx.beginPath()
+  ctx.moveTo(cx - 12, cy); ctx.lineTo(cx + 12, cy)
+  ctx.moveTo(cx, cy - 12); ctx.lineTo(cx, cy + 12)
+  ctx.stroke()
+  ctx.restore()
+}
+
+// ─── Shared pointer helpers ────────────────────────────────────────────────
+function getXY(e, refEl) {
+  const rect = refEl.getBoundingClientRect()
+  const src  = (e.changedTouches || e.touches) ? (e.changedTouches?.[0] ?? e.touches[0]) : e
   return {
-    x: Math.max(0, Math.min(src.clientX - rect.left, dispW.value)),
-    y: Math.max(0, Math.min(src.clientY - rect.top,  dispH.value)),
+    x: Math.max(0, Math.min(src.clientX - rect.left, refEl.clientWidth)),
+    y: Math.max(0, Math.min(src.clientY - rect.top,  refEl.clientHeight)),
   }
 }
 
-function onTouchStart(e) {
-  if (points.value.length >= maxPoints.value) return
+// ─── Ruler touch handlers ──────────────────────────────────────────────────
+function onRulerTouchStart(e) {
   e.preventDefault()
-  touchActive = true
-  const { x, y } = getDisplayXY(e)
-  currentTouch = { x, y }
-  magX.value = x
-  magY.value = y
-  magActive.value = true
-  drawMagnifier(x, y)
+  updateDisplayPpc()   // ensure latest scale before any calculation
+  const { x, y } = getXY(e, imgRef.value)
+  if (!rulerA.value) {
+    rulerA.value    = { x, y }
+    rulerB.value    = null
+    rulerLive.value = null
+  } else if (!rulerB.value) {
+    rulerLive.value = { x, y }
+  }
 }
 
-function onTouchMove(e) {
-  if (!touchActive) return
+function onRulerTouchMove(e) {
+  if (!rulerA.value || rulerB.value) return
   e.preventDefault()
-  const { x, y } = getDisplayXY(e)
-  currentTouch = { x, y }
-  magX.value = x
-  magY.value = y
-  drawMagnifier(x, y)
+  const { x, y } = getXY(e, imgRef.value)
+  rulerLive.value = { x, y }
 }
 
-function onTouchEnd(e) {
-  if (!touchActive) return
+function onRulerTouchEnd(e) {
+  if (!rulerA.value || rulerB.value) return
   e.preventDefault()
-  touchActive = false
-  magActive.value = false
-
-  if (points.value.length >= maxPoints.value) return
-  points.value = [...points.value, { ...currentTouch }]
-  // Ruler: auto-close when 2nd point placed (no explicit close needed)
+  const { x, y } = getXY(e, imgRef.value)
+  rulerB.value    = { x, y }
+  rulerLive.value = null
 }
 
-// Mouse (desktop) — click to place
-function onMouseClick(e) {
-  if (points.value.length >= maxPoints.value) return
-  const { x, y } = getDisplayXY(e)
-  points.value = [...points.value, { x, y }]
+function onRulerClick(e) {
+  updateDisplayPpc()
+  const { x, y } = getXY(e, imgRef.value)
+  if (!rulerA.value) {
+    rulerA.value = { x, y }
+  } else if (!rulerB.value) {
+    rulerB.value = { x, y }
+  }
+}
+
+// ─── Freehand touch handlers ───────────────────────────────────────────────
+function freehandGetXY(e) { return getXY(e, canvasRef.value) }
+
+function onPointerDown(e) {
+  if (isClosed.value) return
+  e.preventDefault()
+  isDrawing.value = true
+  const { x, y } = freehandGetXY(e)
+  strokes.value.push([{ x, y }])
+  mag.value = { visible: true, x, y }
+  redraw(); drawMagnifier(x, y)
+}
+
+function onPointerMove(e) {
+  if (!isDrawing.value) return
+  e.preventDefault()
+  const { x, y } = freehandGetXY(e)
+  const current = strokes.value[strokes.value.length - 1]
+  const last = current[current.length - 1]
+  if (Math.hypot(x - last.x, y - last.y) > 3) current.push({ x, y })
+  mag.value = { visible: true, x, y }
+  redraw(); drawMagnifier(x, y)
+}
+
+function onPointerUp(e) {
+  if (!isDrawing.value) return
+  e.preventDefault()
+  isDrawing.value = false
+  mag.value = { ...mag.value, visible: false }
+  redraw()
 }
 
 // ─── Actions ──────────────────────────────────────────────────────────────
-function undo() {
-  if (isClosed.value) { isClosed.value = false; return }
-  if (points.value.length > 0) points.value = points.value.slice(0, -1)
-}
-
 function clearAll() {
-  points.value  = []
-  isClosed.value = false
+  // ruler
+  rulerA.value = null; rulerB.value = null; rulerLive.value = null
+  // freehand
+  strokes.value = []; isClosed.value = false
+  redraw()
 }
 
-// ─── Snapshot (offscreen canvas for sharing) ──────────────────────────────
+function undoRuler() {
+  if (rulerB.value) { rulerB.value = null }
+  else { rulerA.value = null }
+}
+
+function undoFreehand() {
+  if (isClosed.value) { isClosed.value = false }
+  else if (strokes.value.length > 0) { strokes.value.pop() }
+  redraw()
+}
+
+function closeArea() {
+  if (allPoints.value.length < 3) return
+  isClosed.value = true
+  redraw()
+}
+
+// ─── canConfirm ───────────────────────────────────────────────────────────
+const canConfirm = computed(() =>
+  mode.value === 'ruler'
+    ? rulerCanConfirm.value
+    : allPoints.value.length >= 3,
+)
+
+// ─── Snapshot ─────────────────────────────────────────────────────────────
 function generateSnapshot() {
   const img = imgRef.value
   if (!img || !img.naturalWidth) return null
 
   const nw = img.naturalWidth
   const nh = img.naturalHeight
-  const sc = imgScale.value  // display-px → image-px
+  const sc = nw / (img.clientWidth || 1)   // display-px → image-px
 
   const off = document.createElement('canvas')
-  off.width  = nw
-  off.height = nh
-  const ctx  = off.getContext('2d')
-
-  // 1. Draw original photo at full resolution
+  off.width = nw; off.height = nh
+  const ctx = off.getContext('2d')
   ctx.drawImage(img, 0, 0, nw, nh)
 
-  // 2. Work in image-px coordinates (scale all display-px points by sc)
-  const pts = points.value.map(p => ({ x: p.x * sc, y: p.y * sc }))
+  const ppc = props.pixelsPerCm   // image-px/cm
 
-  if (pts.length < 2) return off.toDataURL('image/jpeg', 0.92)
+  if (mode.value === 'ruler' && rulerA.value && rulerB.value) {
+    const A = { x: rulerA.value.x * sc, y: rulerA.value.y * sc }
+    const B = { x: rulerB.value.x * sc, y: rulerB.value.y * sc }
+    const dist = computeDistanceCm(A, B, ppc)
 
-  const ppc = props.pixelsPerCm   // already in image-px/cm
-
-  // ── Draw polygon / line ────────────────────────────────────────────────
-  ctx.beginPath()
-  ctx.moveTo(pts[0].x, pts[0].y)
-  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
-  if (mode.value === 'polygon') ctx.closePath()
-
-  if (mode.value === 'polygon') {
-    ctx.fillStyle = 'rgba(239,68,68,0.20)'
-    ctx.fill()
-  }
-  ctx.strokeStyle = '#ef4444'
-  ctx.lineWidth   = Math.max(2, nw / 400)
-  ctx.lineJoin    = 'round'
-  ctx.stroke()
-
-  // ── Point dots (numbered) ──────────────────────────────────────────────
-  const dotR    = Math.max(14, nw / 180)
-  const fontSize = dotR * 1.1
-  pts.forEach((p, i) => {
+    // Line
     ctx.beginPath()
-    ctx.arc(p.x, p.y, dotR, 0, Math.PI * 2)
-    ctx.fillStyle   = '#FFB703'
-    ctx.fill()
-    ctx.strokeStyle = '#fff'
-    ctx.lineWidth   = dotR * 0.18
+    ctx.moveTo(A.x, A.y); ctx.lineTo(B.x, B.y)
+    ctx.strokeStyle = '#FFB703'
+    ctx.lineWidth   = Math.max(3, nw / 300)
     ctx.stroke()
 
-    ctx.fillStyle    = '#023047'
-    ctx.font         = `bold ${fontSize}px system-ui, sans-serif`
-    ctx.textAlign    = 'center'
-    ctx.textBaseline = 'middle'
-    ctx.fillText(String(i + 1), p.x, p.y)
-  })
+    // Endpoint dots
+    ;[A, B].forEach(p => {
+      ctx.beginPath()
+      ctx.arc(p.x, p.y, Math.max(14, nw / 180), 0, Math.PI * 2)
+      ctx.fillStyle = '#FFB703'; ctx.fill()
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke()
+    })
 
-  // ── Segment distance badges ────────────────────────────────────────────
-  const dists = computeSegmentDistances(pts, ppc, mode.value === 'polygon')
-  dists.forEach((dist, i) => {
-    const p1  = pts[i]
-    const p2  = i < pts.length - 1 ? pts[i + 1] : pts[0]
-    const mx  = (p1.x + p2.x) / 2
-    const my  = (p1.y + p2.y) / 2
+    // Central badge
+    const mx = (A.x + B.x) / 2, my = (A.y + B.y) / 2
     const lbl = `${dist.toFixed(1)} cm`
+    const fs  = Math.max(18, nw / 130)
+    ctx.font = `bold ${fs}px system-ui, sans-serif`
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+    const tw = ctx.measureText(lbl).width
+    const bw = tw + fs * 2, bh = fs * 2.6, br = bh / 2
+    ctx.fillStyle = 'rgba(15,23,42,0.88)'
+    ctx.beginPath(); ctx.roundRect(mx - bw/2, my - bh/2, bw, bh, br); ctx.fill()
+    ctx.fillStyle = '#FFB703'; ctx.fillText(lbl, mx, my)
 
-    const bFont = Math.max(11, nw / 230)
-    ctx.font      = `bold ${bFont}px system-ui, sans-serif`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const tw   = ctx.measureText(lbl).width
-    const bw   = tw + bFont * 1.4
-    const bh   = bFont * 1.9
-    const br   = bh * 0.35
+  } else if (mode.value === 'freehand') {
+    const pts = allPoints.value.map(p => ({ x: p.x * sc, y: p.y * sc }))
+    if (pts.length < 2) return off.toDataURL('image/jpeg', 0.92)
 
-    ctx.fillStyle = 'rgba(15,23,42,0.84)'
+    // Polygon
     ctx.beginPath()
-    ctx.roundRect(mx - bw / 2, my - bh / 2, bw, bh, br)
-    ctx.fill()
-    ctx.fillStyle = '#FFB703'
-    ctx.fillText(lbl, mx, my)
-  })
+    ctx.moveTo(pts[0].x, pts[0].y)
+    pts.forEach(p => ctx.lineTo(p.x, p.y))
+    ctx.closePath()
+    ctx.fillStyle = 'rgba(239,68,68,0.20)'; ctx.fill()
+    ctx.strokeStyle = '#ef4444'
+    ctx.lineWidth = Math.max(2, nw / 400)
+    ctx.stroke()
 
-  // ── Area badge (polygon mode) ──────────────────────────────────────────
-  if (mode.value === 'polygon' && pts.length >= 3) {
-    const c    = polygonCentroid(pts)
-    let areaVal = 0
+    // Bounding box + area badge
+    const xs = pts.map(p => p.x), ys = pts.map(p => p.y)
+    const minX = Math.min(...xs), maxX = Math.max(...xs)
+    const minY = Math.min(...ys), maxY = Math.max(...ys)
+    const widthCm  = ((maxX - minX) / ppc).toFixed(1)
+    const heightCm = ((maxY - minY) / ppc).toFixed(1)
     let sum = 0
-    for (let i = 0; i < pts.length; i++) {
-      const j = (i + 1) % pts.length
-      sum += pts[i].x * pts[j].y - pts[j].x * pts[i].y
+    pts.forEach((p, i) => { const j = (i+1) % pts.length; sum += p.x*pts[j].y - pts[j].x*p.y })
+    const areaVal = (Math.abs(sum) / 2 / (ppc * ppc)).toFixed(1)
+
+    const PAD = Math.max(30, nw / 40)
+    const TIP = 7
+    const wyLine = Math.max(PAD, minY - PAD)
+    const hxLine = Math.min(nw - PAD, maxX + PAD)
+
+    // Extension lines
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 0.8; ctx.setLineDash([3,4])
+    ctx.beginPath()
+    ctx.moveTo(minX, minY); ctx.lineTo(minX, wyLine)
+    ctx.moveTo(maxX, minY); ctx.lineTo(maxX, wyLine)
+    ctx.moveTo(maxX, minY); ctx.lineTo(hxLine, minY)
+    ctx.moveTo(maxX, maxY); ctx.lineTo(hxLine, maxY)
+    ctx.stroke(); ctx.setLineDash([])
+
+    function arrowH(x1, y, x2) {
+      ctx.beginPath()
+      ctx.moveTo(x1,y); ctx.lineTo(x2,y)
+      ctx.moveTo(x1,y); ctx.lineTo(x1+TIP, y-TIP*0.55); ctx.moveTo(x1,y); ctx.lineTo(x1+TIP, y+TIP*0.55)
+      ctx.moveTo(x2,y); ctx.lineTo(x2-TIP, y-TIP*0.55); ctx.moveTo(x2,y); ctx.lineTo(x2-TIP, y+TIP*0.55)
+      ctx.stroke()
     }
-    areaVal = Math.abs(sum) / 2 / (ppc * ppc)
+    function arrowV(x, y1, y2) {
+      ctx.beginPath()
+      ctx.moveTo(x,y1); ctx.lineTo(x,y2)
+      ctx.moveTo(x,y1); ctx.lineTo(x-TIP*0.55,y1+TIP); ctx.moveTo(x,y1); ctx.lineTo(x+TIP*0.55,y1+TIP)
+      ctx.moveTo(x,y2); ctx.lineTo(x-TIP*0.55,y2-TIP); ctx.moveTo(x,y2); ctx.lineTo(x+TIP*0.55,y2-TIP)
+      ctx.stroke()
+    }
 
-    const lbl  = `${areaVal.toFixed(1)} cm²`
-    const aFont = Math.max(14, nw / 170)
-    ctx.font = `bold ${aFont}px system-ui, sans-serif`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const tw = ctx.measureText(lbl).width
-    const bw = tw + aFont * 1.6
-    const bh = aFont * 2.2
-    const br = bh * 0.35
+    ctx.strokeStyle = 'rgba(255,255,255,0.9)'; ctx.lineWidth = 1.5
+    arrowH(minX, wyLine, maxX); arrowV(hxLine, minY, maxY)
 
-    ctx.fillStyle = 'rgba(15,23,42,0.88)'
-    ctx.beginPath()
-    ctx.roundRect(c.x - bw / 2, c.y - bh / 2, bw, bh, br)
-    ctx.fill()
-    ctx.fillStyle = '#fff'
-    ctx.fillText(lbl, c.x, c.y)
-  }
+    function badge(text, x, y, big = false) {
+      const fs = big ? Math.max(14, nw / 170) : Math.max(11, nw / 230)
+      ctx.font = `bold ${fs}px system-ui, sans-serif`
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
+      const tw = ctx.measureText(text).width
+      const bw = tw + fs*1.4, bh = fs*1.9, br = bh*0.35
+      ctx.fillStyle = big ? 'rgba(15,23,42,0.88)' : 'rgba(15,23,42,0.84)'
+      ctx.beginPath(); ctx.roundRect(x-bw/2,y-bh/2,bw,bh,br); ctx.fill()
+      ctx.fillStyle = big ? '#fff' : '#f59e0b'
+      ctx.fillText(text, x, y)
+    }
 
-  // ── Ruler: big central badge ───────────────────────────────────────────
-  if (mode.value === 'ruler' && pts.length === 2) {
-    const dist = computeDistanceCm(pts[0], pts[1], ppc)
-    const mx   = (pts[0].x + pts[1].x) / 2
-    const my   = (pts[0].y + pts[1].y) / 2
-    const lbl  = `${dist.toFixed(1)} cm`
-    const aFont = Math.max(16, nw / 150)
-    ctx.font = `bold ${aFont}px system-ui, sans-serif`
-    ctx.textAlign = 'center'
-    ctx.textBaseline = 'middle'
-    const tw = ctx.measureText(lbl).width
-    const bw = tw + aFont * 2
-    const bh = aFont * 2.4
-    const br = bh / 2
-
-    ctx.fillStyle = 'rgba(15,23,42,0.88)'
-    ctx.beginPath()
-    ctx.roundRect(mx - bw / 2, my - bh / 2, bw, bh, br)
-    ctx.fill()
-    ctx.fillStyle = '#FFB703'
-    ctx.fillText(lbl, mx, my)
+    badge(`${widthCm} cm`, (minX+maxX)/2, wyLine)
+    badge(`${heightCm} cm`, hxLine+22, (minY+maxY)/2)
+    badge(`${areaVal} cm²`, (minX+maxX)/2, (minY+maxY)/2, true)
   }
 
   return off.toDataURL('image/jpeg', 0.92)
@@ -337,198 +459,162 @@ function generateSnapshot() {
 
 // ─── Confirm ──────────────────────────────────────────────────────────────
 function complete() {
-  isClosed.value = true
+  if (mode.value === 'freehand') closeArea()
   const snapshotUrl = generateSnapshot()
   if (mode.value === 'ruler') {
     emit('complete', {
       mode: 'ruler',
       distanceCm: rulerDist.value,
-      points: points.value,
+      points: [rulerA.value, rulerB.value],
       snapshotUrl,
     })
   } else {
-    emit('complete', {
-      mode: 'polygon',
-      points: points.value,
-      snapshotUrl,
-    })
+    emit('complete', { mode: 'polygon', points: allPoints.value, snapshotUrl })
   }
 }
 
-// ─── Hint text ────────────────────────────────────────────────────────────
+// ─── Lifecycle (freehand canvas) ──────────────────────────────────────────
+const bgImage = new Image()
+bgImage.onload = () => { if (mode.value === 'freehand') redraw() }
+
+onMounted(async () => {
+  bgImage.src = props.imageDataUrl
+  await nextTick()
+  resizeCanvas()
+  window.addEventListener('resize', resizeCanvas)
+})
+watch(() => props.imageDataUrl, src => { bgImage.src = src })
+
+// Redraw when strokes change
+watch([strokes, isClosed], () => { if (mode.value === 'freehand') redraw() }, { deep: true })
+
+// ─── Hint ─────────────────────────────────────────────────────────────────
 const hintText = computed(() => {
   if (mode.value === 'ruler') {
-    if (points.value.length === 0) return 'Toque no ponto inicial (A)'
-    if (points.value.length === 1) return 'Toque no ponto final (B)'
-    return 'Pronto! Confirme a medida abaixo'
+    if (!rulerA.value) return 'Toque no ponto A'
+    if (!rulerB.value) return 'Arraste ou toque no ponto B'
+    return `${rulerDist.value?.toFixed(1) ?? '—'} cm — confirme abaixo`
   }
-  if (points.value.length === 0) return 'Toque para marcar o 1º ponto'
-  if (points.value.length < 3)   return `Ponto ${points.value.length + 1} — continue marcando`
-  return 'Marque mais pontos ou calcule a área'
+  if (allPoints.value.length === 0) return 'Risque o contorno da área'
+  if (isClosed.value) return `Área: ${areaCm2.value.toFixed(1)} cm² — confirme abaixo`
+  return 'Continue riscando — levante o dedo para reposicionar'
 })
 </script>
 
 <template>
   <div class="mc-wrap">
 
-    <!-- ── Mode selector tabs ─────────────────────────────────────────── -->
+    <!-- ── Mode tabs ─────────────────────────────────────────────────── -->
     <div class="mc-mode-bar">
-      <button
-        class="mode-tab"
-        :class="{ active: mode === 'ruler' }"
-        @click="setMode('ruler')"
-      >
-        📏 Fita métrica
-      </button>
-      <button
-        class="mode-tab"
-        :class="{ active: mode === 'polygon' }"
-        @click="setMode('polygon')"
-      >
-        📐 Área
-      </button>
+      <button class="mode-tab" :class="{ active: mode === 'ruler' }"    @click="setMode('ruler')">📏 Fita métrica</button>
+      <button class="mode-tab" :class="{ active: mode === 'freehand' }" @click="setMode('freehand')">✏️ Desenhar área</button>
     </div>
 
-    <!-- ── Photo + SVG overlay ───────────────────────────────────────── -->
-    <div
-      class="mc-img-wrap"
-      @mousedown="onMouseClick"
-      @touchstart.passive="onTouchStart"
-      @touchmove.passive="onTouchMove"
-      @touchend.passive="onTouchEnd"
-    >
-      <img
-        ref="imgRef"
-        :src="imageDataUrl"
-        class="mc-img"
-        draggable="false"
-        @load="updateDispSize"
-        alt=""
-      />
-
-      <!-- SVG measurement overlay -->
-      <svg
-        class="mc-svg"
-        :viewBox="`0 0 ${dispW} ${dispH}`"
-        xmlns="http://www.w3.org/2000/svg"
-        preserveAspectRatio="none"
+    <!-- ══ RULER MODE ════════════════════════════════════════════════════ -->
+    <template v-if="mode === 'ruler'">
+      <div
+        class="mc-img-wrap"
+        @mousedown="onRulerClick"
+        @touchstart.prevent="onRulerTouchStart"
+        @touchmove.prevent="onRulerTouchMove"
+        @touchend.prevent="onRulerTouchEnd"
       >
-        <!-- Polygon fill when closed -->
-        <polygon
-          v-if="mode === 'polygon' && isClosed && points.length >= 3"
-          :points="svgPolygonPoints"
-          fill="rgba(239,68,68,0.20)"
-          stroke="none"
-        />
+        <img ref="imgRef" :src="imageDataUrl" class="mc-img" draggable="false" @load="updateDisplayPpc" alt="" />
 
-        <!-- Closing edge dashed preview (polygon, 3+ pts, before confirm) -->
-        <line
-          v-if="mode === 'polygon' && points.length >= 3 && !isClosed"
-          :x1="points[points.length - 1].x" :y1="points[points.length - 1].y"
-          :x2="points[0].x" :y2="points[0].y"
-          stroke="#ef4444" stroke-width="1.5" stroke-dasharray="8 5" opacity="0.5"
-        />
-
-        <!-- Segments + distance badges -->
-        <g v-for="(seg, i) in segments" :key="`seg-${i}`">
+        <svg
+          class="mc-svg"
+          :viewBox="`0 0 ${dispW} ${dispH}`"
+          xmlns="http://www.w3.org/2000/svg"
+          preserveAspectRatio="none"
+        >
+          <!-- Line A→B (live while dragging) -->
           <line
-            :x1="seg.p1.x" :y1="seg.p1.y"
-            :x2="seg.p2.x" :y2="seg.p2.y"
-            stroke="#ef4444" stroke-width="2.5"
-            stroke-linecap="round"
+            v-if="rulerA && rulerBActive"
+            :x1="rulerA.x" :y1="rulerA.y"
+            :x2="rulerBActive.x" :y2="rulerBActive.y"
+            stroke="#FFB703" stroke-width="2.5" stroke-linecap="round"
           />
-          <!-- Badge background -->
-          <rect
-            :x="seg.mid.x - 26" :y="seg.mid.y - 11"
-            width="52" height="22" rx="6"
-            fill="rgba(15,23,42,0.84)"
-          />
-          <text
-            :x="seg.mid.x" :y="seg.mid.y"
-            text-anchor="middle" dominant-baseline="central"
-            fill="#FFB703" font-size="11" font-weight="bold" font-family="system-ui, sans-serif"
-          >{{ seg.dist.toFixed(1) }} cm</text>
-        </g>
 
-        <!-- Area badge in centroid (polygon, 3+ pts) -->
-        <g v-if="mode === 'polygon' && points.length >= 3">
-          <rect
-            :x="centroid.x - 38" :y="centroid.y - 14"
-            width="76" height="28" rx="8"
-            fill="rgba(15,23,42,0.88)"
-          />
-          <text
-            :x="centroid.x" :y="centroid.y"
-            text-anchor="middle" dominant-baseline="central"
-            fill="#fff" font-size="13" font-weight="bold" font-family="system-ui, sans-serif"
-          >{{ areaCm2.toFixed(1) }} cm²</text>
-        </g>
+          <!-- Central distance badge (live) -->
+          <g v-if="rulerMid && rulerDist !== null">
+            <rect
+              :x="rulerMid.x - 46" :y="rulerMid.y - 18"
+              width="92" height="36" rx="18"
+              fill="rgba(15,23,42,0.90)"
+            />
+            <text
+              :x="rulerMid.x" :y="rulerMid.y"
+              text-anchor="middle" dominant-baseline="central"
+              fill="#FFB703" font-size="16" font-weight="bold" font-family="system-ui, sans-serif"
+            >{{ rulerDist.toFixed(1) }} cm</text>
+          </g>
 
-        <!-- Ruler: big central badge -->
-        <g v-if="mode === 'ruler' && rulerDist !== null">
-          <rect
-            :x="((points[0].x + points[1].x) / 2) - 44"
-            :y="((points[0].y + points[1].y) / 2) - 17"
-            width="88" height="34" rx="17"
-            fill="rgba(15,23,42,0.88)"
-          />
-          <text
-            :x="(points[0].x + points[1].x) / 2"
-            :y="(points[0].y + points[1].y) / 2"
-            text-anchor="middle" dominant-baseline="central"
-            fill="#FFB703" font-size="15" font-weight="bold" font-family="system-ui, sans-serif"
-          >{{ rulerDist.toFixed(1) }} cm</text>
-        </g>
+          <!-- Point A -->
+          <g v-if="rulerA">
+            <circle :cx="rulerA.x" :cy="rulerA.y" r="16" fill="#FFB703" stroke="white" stroke-width="2.5"/>
+            <text :x="rulerA.x" :y="rulerA.y" text-anchor="middle" dominant-baseline="central"
+              fill="#023047" font-weight="bold" font-size="13" font-family="system-ui, sans-serif">A</text>
+          </g>
 
-        <!-- Points (numbered circles) -->
-        <g v-for="(pt, i) in points" :key="`pt-${i}`">
-          <circle :cx="pt.x" :cy="pt.y" r="16" fill="#FFB703" stroke="white" stroke-width="2.5" />
-          <text
-            :x="pt.x" :y="pt.y"
-            text-anchor="middle" dominant-baseline="central"
-            fill="#023047" font-weight="bold" font-size="13" font-family="system-ui, sans-serif"
-          >{{ i + 1 }}</text>
-        </g>
-      </svg>
+          <!-- Point B (fixed) or live B -->
+          <g v-if="rulerBActive">
+            <circle :cx="rulerBActive.x" :cy="rulerBActive.y" r="16"
+              :fill="rulerLive ? 'rgba(255,183,3,0.7)' : '#FFB703'"
+              stroke="white" stroke-width="2.5"/>
+            <text :x="rulerBActive.x" :y="rulerBActive.y" text-anchor="middle" dominant-baseline="central"
+              fill="#023047" font-weight="bold" font-size="13" font-family="system-ui, sans-serif">B</text>
+          </g>
+        </svg>
 
-      <!-- Magnifier -->
-      <canvas
-        v-show="magActive"
-        ref="magRef"
-        class="mc-magnifier"
-        :width="MAG_SIZE"
-        :height="MAG_SIZE"
-        :style="{
-          left: `${magX - MAG_SIZE / 2}px`,
-          top:  `${magY - MAG_OFFSET - MAG_SIZE / 2}px`,
-        }"
-      />
+        <div class="mc-hint">{{ hintText }}</div>
+      </div>
 
-      <!-- Floating hint pill -->
-      <div class="mc-hint">{{ hintText }}</div>
-    </div>
+      <!-- Bottom bar ruler -->
+      <div class="mc-bar">
+        <button class="btn btn-ghost btn-sm" :disabled="!rulerA" @click="undoRuler">↩ Desfazer</button>
+        <button class="btn btn-danger btn-sm" :disabled="!rulerA" @click="clearAll">🗑 Limpar</button>
+      </div>
+    </template>
 
-    <!-- ── Bottom action bar ─────────────────────────────────────────── -->
-    <div class="mc-bar">
-      <button
-        class="btn btn-ghost btn-sm"
-        :disabled="points.length === 0"
-        @click="undo"
-      >↩ Desfazer</button>
-      <button
-        class="btn btn-danger btn-sm"
-        :disabled="points.length === 0"
-        @click="clearAll"
-      >🗑 Limpar</button>
-    </div>
+    <!-- ══ FREEHAND MODE ══════════════════════════════════════════════════ -->
+    <template v-else>
+      <div class="mc-wrap-inner" ref="wrapRef">
+        <!-- Hidden img for snapshot (keeps proportions for drawImage) -->
+        <img ref="imgRef" :src="imageDataUrl" class="mc-img-hidden" draggable="false" @load="() => { updateDisplayPpc(); redraw() }" alt="" />
 
-    <!-- ── Floating CTA ───────────────────────────────────────────────── -->
+        <canvas
+          ref="canvasRef"
+          class="tc-canvas"
+          @mousedown="onPointerDown"
+          @mousemove="onPointerMove"
+          @mouseup="onPointerUp"
+          @mouseleave="onPointerUp"
+          @touchstart.prevent="onPointerDown"
+          @touchmove.prevent="onPointerMove"
+          @touchend.prevent="onPointerUp"
+          @touchcancel.prevent="onPointerUp"
+        />
+
+        <!-- Hint when empty -->
+        <div v-if="allPoints.length === 0 && !isDrawing" class="tc-hint">
+          <div class="tc-hint-box">
+            <span class="tc-hint-icon">✏️</span>
+            <span>Risque o contorno da área da arte</span>
+            <span class="tc-hint-sub">Levante o dedo para reposicionar</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom bar freehand -->
+      <div class="mc-bar">
+        <button class="btn btn-ghost btn-sm" :disabled="allPoints.length === 0" @click="undoFreehand">↩ Desfazer traço</button>
+        <button class="btn btn-danger btn-sm" :disabled="allPoints.length === 0" @click="clearAll">🗑 Limpar tudo</button>
+      </div>
+    </template>
+
+    <!-- ── Floating CTA (both modes) ──────────────────────────────────── -->
     <transition name="cta-pop">
-      <button
-        v-if="canConfirm"
-        class="mc-cta"
-        @click="complete"
-      >
+      <button v-if="canConfirm" class="mc-cta" @click="complete">
         {{ mode === 'ruler' ? '📏 Confirmar Distância →' : '📐 Calcular Área →' }}
       </button>
     </transition>
@@ -553,7 +639,6 @@ const hintText = computed(() => {
   border-bottom: 1px solid var(--bg-700);
   flex-shrink: 0;
 }
-
 .mode-tab {
   flex: 1;
   padding: 12px 8px;
@@ -567,24 +652,17 @@ const hintText = computed(() => {
   transition: color 0.15s, border-color 0.15s;
   -webkit-tap-highlight-color: transparent;
 }
+.mode-tab.active { color: var(--accent-amber); border-bottom-color: var(--accent-amber); }
 
-.mode-tab.active {
-  color: var(--accent-amber);
-  border-bottom-color: var(--accent-amber);
-}
-
-/* ── Image area ────────────────────────────────────────────────────────── */
+/* ── Ruler: image wrapper ──────────────────────────────────────────────── */
 .mc-img-wrap {
   flex: 1;
   position: relative;
-  overflow: hidden;
-  cursor: crosshair;
   touch-action: none;
   -webkit-tap-highlight-color: transparent;
-  display: flex;
-  align-items: flex-start;
+  cursor: crosshair;
+  overflow: hidden;
 }
-
 .mc-img {
   display: block;
   width: 100%;
@@ -592,7 +670,6 @@ const hintText = computed(() => {
   user-select: none;
   pointer-events: none;
 }
-
 .mc-svg {
   position: absolute;
   top: 0; left: 0;
@@ -601,20 +678,60 @@ const hintText = computed(() => {
   overflow: visible;
 }
 
-/* ── Magnifier ─────────────────────────────────────────────────────────── */
-.mc-magnifier {
-  position: absolute;
-  border-radius: 50%;
-  pointer-events: none;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+/* ── Freehand: canvas wrapper ──────────────────────────────────────────── */
+.mc-wrap-inner {
+  flex: 1;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #000;
 }
+.mc-img-hidden {
+  /* Hidden reference for drawImage in generateSnapshot */
+  position: absolute;
+  width: 1px; height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+.tc-canvas {
+  flex: 1;
+  width: 100%;
+  display: block;
+  touch-action: none;
+  cursor: crosshair;
+}
+.tc-hint {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.tc-hint-box {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 24px;
+  background: rgba(15,23,42,0.75);
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--bg-600);
+  backdrop-filter: blur(8px);
+  font-size: 14px;
+  color: var(--text-300);
+  text-align: center;
+  max-width: 220px;
+}
+.tc-hint-icon { font-size: 28px; }
+.tc-hint-sub  { font-size: 11px; color: var(--bg-600); margin-top: 2px; }
 
-/* ── Floating hint ─────────────────────────────────────────────────────── */
+/* ── Shared: hint pill ─────────────────────────────────────────────────── */
 .mc-hint {
   position: absolute;
   top: 12px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 50%; transform: translateX(-50%);
   background: rgba(2,30,45,0.88);
   backdrop-filter: blur(10px);
   border: 1px solid rgba(255,183,3,0.5);
@@ -644,8 +761,7 @@ const hintText = computed(() => {
 .mc-cta {
   position: absolute;
   bottom: 72px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 50%; transform: translateX(-50%);
   white-space: nowrap;
   padding: 16px 32px;
   background: var(--accent-green);
@@ -666,7 +782,6 @@ const hintText = computed(() => {
   0%, 100% { box-shadow: 0 4px 24px rgba(34,197,94,0.5); }
   50%       { box-shadow: 0 4px 36px rgba(34,197,94,0.85); }
 }
-
 .cta-pop-enter-active { transition: opacity 0.25s, transform 0.25s; }
 .cta-pop-leave-active { transition: opacity 0.15s; }
 .cta-pop-enter-from  { opacity: 0; transform: translateX(-50%) translateY(12px); }

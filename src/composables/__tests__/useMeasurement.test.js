@@ -3,6 +3,7 @@ import {
   computeDistanceCm,
   computeSegmentDistances,
   polygonCentroid,
+  computeEffectivePpc,
 } from '../useMeasurement.js'
 
 // ─── computeDistanceCm ──────────────────────────────────────────────────────
@@ -115,6 +116,50 @@ describe('polygonCentroid — centro geométrico do polígono', () => {
     const c = polygonCentroid([])
     expect(c.x).toBe(0)
     expect(c.y).toBe(0)
+  })
+
+})
+
+// ─── computeEffectivePpc ─────────────────────────────────────────────────────
+
+describe('computeEffectivePpc — converte ppc de image-px para display-px', () => {
+
+  // ── Caminhos felizes ─────────────────────────────────────────────────────
+
+  it('CF-04: ppc=192 img-px/cm, natural=1920, client=390 → 39.0 display-px/cm', () => {
+    // 192 * (390 / 1920) = 39.0
+    expect(computeEffectivePpc(192, 1920, 390)).toBeCloseTo(39.0, 5)
+  })
+
+  it('CF-04b: ppc=10, natural=1000, client=500 → 5.0 display-px/cm', () => {
+    expect(computeEffectivePpc(10, 1000, 500)).toBeCloseTo(5.0, 5)
+  })
+
+  it('CF-04c: imagem 1:1 (natural=client) → ppc inalterado', () => {
+    expect(computeEffectivePpc(50, 800, 800)).toBeCloseTo(50, 5)
+  })
+
+  it('CF-04d: integração — effectivePpc correto produz distância correta', () => {
+    // Calibrado: 390px display = 10 cm → ppc_image = 390*(1920/390)/10 = 192
+    // effectivePpc = 192*(390/1920) = 39
+    // Medir 390px display: 390/39 = 10 cm ✓
+    const ppc = computeEffectivePpc(192, 1920, 390)
+    const dist = computeDistanceCm({ x: 0, y: 0 }, { x: 390, y: 0 }, ppc)
+    expect(dist).toBeCloseTo(10, 2)
+  })
+
+  // ── Caminhos infelizes ───────────────────────────────────────────────────
+
+  it('CI-08: naturalWidth=0 → 0 sem dividir por zero', () => {
+    expect(computeEffectivePpc(192, 0, 390)).toBe(0)
+  })
+
+  it('CI-09: clientWidth=0 → 0 sem dividir por zero', () => {
+    expect(computeEffectivePpc(192, 1920, 0)).toBe(0)
+  })
+
+  it('CI-10: ppc=0 → 0', () => {
+    expect(computeEffectivePpc(0, 1920, 390)).toBe(0)
   })
 
 })
